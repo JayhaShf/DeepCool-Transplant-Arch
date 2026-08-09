@@ -31,10 +31,10 @@
       switch (String(name || '').toLowerCase()) {
         case 'cpu temperature': case 'cpu temp': return { v: round(s.cpu_temp), u: '°C', big: true };
         case 'cpu frequency': case 'cpu freq': return { v: round(Number(s.cpu_freq) || 0, 1), u: 'GHZ', big: false };
-        case 'cpu power': return { v: round(s.cpu_power), u: 'W', big: false };
+        case 'cpu power': return { v: round(s.cpu_power, 0), u: 'W', big: false };
         case 'cpu load': case 'cpu usage': return { v: round(s.cpu_usage), u: '%', big: false };
         case 'gpu temperature': case 'gpu temp': return { v: round(s.gpu_temp), u: '°C', big: true };
-        case 'gpu power': return { v: round(s.gpu_power), u: 'W', big: false };
+        case 'gpu power': return { v: round(s.gpu_power, 0), u: 'W', big: false };
         case 'gpu usage': case 'gpu load': return { v: round(s.gpu_usage), u: '%', big: false };
         case 'gpu memory': case 'gpu mem': case '显存': return { v: `${round(s.gpu_mem_used / 1073741824, 1)}/${round(s.gpu_mem_total / 1073741824, 1)}`, u: 'G', big: false };
         case 'ram': case 'ram usage': case 'memory usage':
