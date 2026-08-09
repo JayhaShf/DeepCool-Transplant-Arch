@@ -748,6 +748,31 @@ originalHandle('linux/windows', async () => {
     bounds: win.getBounds(),
   }));
 });
+// 个性化设置持久化：重启软件后自动恢复 LCD 显示内容
+function presetStorePath() {
+  try { return path.join(app.getPath('userData'), 'preset.json'); } catch (_) { return null; }
+}
+originalHandle('linux/preset-save', async (_event, config) => {
+  try {
+    const file = presetStorePath();
+    if (file) fs.writeFileSync(file, JSON.stringify(config || {}), 'utf8');
+    return { ok: true };
+  } catch (error) {
+    log('preset-save failed:', error);
+    return { ok: false, error: error.message || String(error) };
+  }
+});
+originalHandle('linux/preset-load', async () => {
+  try {
+    const file = presetStorePath();
+    if (!file || !fs.existsSync(file)) return null;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return parsed && parsed.digitalData ? parsed : null;
+  } catch (error) {
+    log('preset-load failed:', error);
+    return null;
+  }
+});
 originalHandle('linux/hold-state', async (_event, active) => {
   externalHoldActive = Boolean(active);
   log('external hold state', externalHoldActive);

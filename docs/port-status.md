@@ -153,3 +153,10 @@
 - 适配 Niri Super+Q（窗口管理器关闭）→ 隐藏后台而非退出。
 - 托盘“退出”设置 isQuitting=true 后 app.quit()；before-quit 放行系统注销。
 - 验证：window.close() 后 visible=false、进程存活、推帧持续；二次启动恢复显示、单实例。
+
+## 重启恢复 LCD 预设（2026-08-10）
+
+- 新增 linux/preset-save、linux/preset-load IPC（userData/preset.json）。
+- overlay 保存 modelConfigurationSet 时持久化；启动 1.8s 后自动 restorePreset。
+- 验证：设置 GPU监控（亮度60）→ 重启 → active=true/mode=preset/brightness=60、
+  daemon static、推帧持续。

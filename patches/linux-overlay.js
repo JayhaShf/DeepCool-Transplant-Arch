@@ -401,6 +401,8 @@
         presetConfig = cfg;
         if (cfg && cfg.brightnessControl !== undefined) lastBrightness = cfg.brightnessControl;
         startLoop('preset');
+        // 持久化，重启后自动恢复
+        invoke('linux/preset-save', cfg).catch(() => {});
       }
       // 上传/编辑图片成功：显示该图片（软件预览与 LCD 同一张）
       if ((channel === 'l122/uploadSelectedMedia' || channel === 'l122/modifyMedia') && result && result.code === 0 && result.data && result.data.frameDataUrl) {
@@ -420,6 +422,22 @@
         stopLoop();
       }
     }
+    // 重启软件后自动恢复上次保存的个性化设置（否则 LCD 只剩黑屏/纯色）
+    async function restorePreset() {
+      try {
+        const saved = await invoke('linux/preset-load');
+        if (saved && saved.digitalData && !active && !zenActive) {
+          presetConfig = saved;
+          if (saved.brightnessControl !== undefined) lastBrightness = saved.brightnessControl;
+          startLoop('preset');
+          console.log('[DeepCool Linux] restored preset:', saved.digitalData);
+        }
+      } catch (error) {
+        console.error('[DeepCool Linux] restore preset failed:', error);
+      }
+    }
+    setTimeout(restorePreset, 1800);
+
     setTimeout(ensureAutoPreview, 1200);
     setInterval(ensureAutoPreview, 1000);
 
