@@ -160,3 +160,11 @@
 - overlay 保存 modelConfigurationSet 时持久化；启动 1.8s 后自动 restorePreset。
 - 验证：设置 GPU监控（亮度60）→ 重启 → active=true/mode=preset/brightness=60、
   daemon static、推帧持续。
+
+## 默认打开 LCD 字体不一致修复（2026-08-10）
+
+- 原因：官方 JZFS-Sans 字体只在 L122 页面 chunk CSS 注册；首页/自动恢复推帧时
+  未加载，canvas 回退系统字体；手动切换个性化设置时已进入 L122 页面，字体生效。
+- 修复：overlay 主动注入 @font-face（同源 JZFSSans-Light otf，font-weight 100-900），
+  并在每次推帧前 ensureFontsReady()。
+- 验证：首页 document.fonts.check('70px JZFS-Sans')=true；自动恢复推帧正常。

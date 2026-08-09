@@ -131,7 +131,24 @@
     officialAssets.cpu_icon.src = ICONS.cpu_icon;
     officialAssets.gpu_icon.src = ICONS.gpu_icon;
     officialAssets.ram_icon.src = ICONS.ram_icon;
-    try { document.fonts.load('16px "JZFS-Sans"'); } catch (_) {}
+    // 官方 JZFS-Sans 字体只在 L122 页面 chunk CSS 中注册；首页/自动恢复时未加载，
+    // 会导致 canvas 回退系统字体。这里主动注入 @font-face（与官方同源文件）。
+    function ensureOfficialFont() {
+      try {
+        if (!document.fonts.check('16px "JZFS-Sans"')) {
+          const style = document.createElement('style');
+          style.textContent = `@font-face { font-family: 'JZFS-Sans'; src: url('./assets/JZFSSans-Light-ea2a1e77.otf') format('opentype'); font-weight: 100 900; }`;
+          document.head.appendChild(style);
+        }
+      } catch (_) {}
+    }
+    ensureOfficialFont();
+    async function ensureFontsReady() {
+      try { await document.fonts.load('300 70px JZFS-Sans'); } catch (_) {}
+      try { await document.fonts.load('200 40px JZFS-Sans'); } catch (_) {}
+      try { await document.fonts.load('300 10px JZFS-Sans'); } catch (_) {}
+      try { await document.fonts.ready; } catch (_) {}
+    }
 
     function drawOfficialPreset(config, status) {
       const canvas = document.createElement('canvas');
@@ -303,6 +320,7 @@
 
     async function pushFrame(mode) {
       try {
+        await ensureFontsReady();
         const status = await invoke('linux/status');
         if (!active || currentMode !== mode) return;
         let canvas;
