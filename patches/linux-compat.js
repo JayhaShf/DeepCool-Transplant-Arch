@@ -20,6 +20,7 @@ const BLACK_320_240_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAA
 // app is ready. This also guarantees the main window is visible and focused.
 const IS_BACKGROUND = process.env.DEEPCOOL_BACKGROUND === '1';
 let tray = null;
+let isQuitting = false; // 仅托盘“退出”或系统关机时真正退出；关闭窗口只隐藏到后台
 
 app.whenReady().then(() => {
   // 后台运行：禁用渲染节流，保证 setInterval 推帧不因窗口不可见被暂停。
@@ -42,11 +43,22 @@ app.whenReady().then(() => {
         try { launch.close(); } catch (_) {}
       }
       const target = main || windows[0];
+      // 关闭窗口 = 隐藏到后台（适配 Niri Super+Q / 窗口管理器关闭），托盘常驻。
+      // 只有托盘“退出”或 app.quit()（isQuitting=true）才真正关闭。
+      for (const win of windows) {
+        if (win === launch) continue; // launch 页照常关闭
+        win.on('close', (event) => {
+          if (!isQuitting) {
+            event.preventDefault();
+            try { win.hide(); } catch (_) {}
+          }
+        });
+      }
       if (target) {
+        try { setupTray(target); } catch (error) { log('tray setup failed:', error); }
         if (IS_BACKGROUND) {
-          // 后台模式：隐藏窗口，保留托盘图标
+          // 后台模式：隐藏窗口
           try { target.hide(); } catch (_) {}
-          try { setupTray(target); } catch (error) { log('tray setup failed:', error); }
         } else {
           if (target.isMinimized()) target.restore();
           target.show();
@@ -57,6 +69,11 @@ app.whenReady().then(() => {
       try { console.error('[DeepCool Linux] launch transition fallback failed:', error); } catch (_) {}
     }
   }, 1200);
+});
+
+// 所有窗口关闭（理论上被上面拦截后不会发生）也不退出，保持后台/托盘。
+app.on('window-all-closed', () => {
+  // 保持运行（后台渲染 LCD 需要）
 });
 
 function setupTray(targetWindow) {
@@ -82,7 +99,10 @@ function setupTray(targetWindow) {
           targetWindow.focus();
         } catch (_) {}
       } },
-    { label: '退出', click: () => { try { app.quit(); } catch (_) {} } },
+    { label: '退出', click: () => {
+        isQuitting = true;
+        try { app.quit(); } catch (_) {}
+      } },
   ]));
   tray.on('click', () => {
     try {
@@ -95,6 +115,8 @@ function setupTray(targetWindow) {
 // Desktop launcher double-click / repeated launches: keep a single instance.
 // A second instance would otherwise block on the Chromium profile lock while
 // the first window is already open, which looks like a very slow startup.
+app.on('before-quit', () => { isQuitting = true; });
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {

@@ -145,3 +145,11 @@
 - linux-compat.js 后台模式：隐藏窗口 + 系统托盘（点击切换、菜单显示/退出），
   并对所有窗口 setBackgroundThrottling(false) 保证后台推帧不被节流。
 - 验证：后台启动窗口 visible=false、推帧日志持续、二次启动显示窗口且单实例。
+
+## 关闭窗口后台化（2026-08-10）
+
+- 窗口 close 事件拦截：非退出时 preventDefault + hide()，进程与 LCD 推帧保持。
+- 托盘常驻：无论前台/后台启动均创建托盘；左键切换、菜单“显示主界面/退出”。
+- 适配 Niri Super+Q（窗口管理器关闭）→ 隐藏后台而非退出。
+- 托盘“退出”设置 isQuitting=true 后 app.quit()；before-quit 放行系统注销。
+- 验证：window.close() 后 visible=false、进程存活、推帧持续；二次启动恢复显示、单实例。
