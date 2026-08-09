@@ -30,11 +30,11 @@ LM-Series LCD daemon 接到官方 UI。
 
 官方仪表盘（Linux 实时传感器）：
 
-![DeepCool Linux dashboard](screenshots/deepcool-linux-dashboard.png)
+![DeepCool Linux dashboard](screenshots/deepcool-linux-dashboard-v2.png)
 
 LM-Series 官方设备页（含 Linux 桥）：
 
-![DeepCool Linux LM-Series](screenshots/deepcool-linux-lm-series.png)
+![DeepCool Linux LM-Series](screenshots/deepcool-linux-lm-series-v2.png)
 
 ## 为什么不能直接运行 Windows 包
 
@@ -216,7 +216,7 @@ UI 一直停在“处理中”。移植层已实现 Linux 上传：
 
 当前项目渲染的预设帧（320×240）：
 
-![官方布局帧](screenshots/deepcool-lcd-frame-official.png)
+![官方布局帧](screenshots/deepcool-lcd-frame-official-v2.png)
 
 ## 统一渲染（2026-08-09）
 
