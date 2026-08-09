@@ -229,12 +229,41 @@
       };
       const drawSide = (data, key) => {
         const p = pos[key]; const st = style[key];
-        officialText(ctx, data.value, p.valueX, p.valueY, st.valueSize, st.valueColor, st.valueWeight);
-        const valueWidth = officialGetWidth(ctx, data.value, st.valueSize, st.valueWeight);
-        officialText(ctx, data.unit, p.valueX + valueWidth + p.unitOffsetLeft, p.valueY + p.unitOffsetTop, st.unitSize, st.unitColor, st.unitWeight);
-        officialText(ctx, data.text, p.textX, p.textY, st.textSize, st.textColor, st.textWeight);
+        // 副数据区域边界（横屏 211~310；竖屏 sub1 23~127、sub2 135~229）
+        let sideLeft, sideRight;
+        if (horizontal) {
+          sideLeft = p.valueX; sideRight = canvas.width - 10;
+        } else {
+          sideLeft = p.valueX;
+          sideRight = key === 'subData1' ? 127 : 229;
+        }
+        const sideCenterX = (sideLeft + sideRight) / 2;
+        const maxSideWidth = sideRight - sideLeft - 8;
+        // 自适应缩放：数值+单位不超出副数据区域
+        let fs = st.valueSize;
+        let unitFs = st.unitSize;
+        while (fs > 20 &&
+               officialGetWidth(ctx, data.value, fs, st.valueWeight) + officialGetWidth(ctx, data.unit, unitFs, st.unitWeight) + 6 > maxSideWidth) {
+          fs -= 2;
+          unitFs = Math.max(8, unitFs - 1);
+        }
+        // 数值+单位整体在区域内居中
+        const valueWidth = officialGetWidth(ctx, data.value, fs, st.valueWeight);
+        const unitWidth = officialGetWidth(ctx, data.unit, unitFs, st.unitWeight);
+        const totalWidth = valueWidth + p.unitOffsetLeft + unitWidth;
+        const startX = sideCenterX - totalWidth / 2;
+        officialText(ctx, data.value, startX, p.valueY, fs, st.valueColor, st.valueWeight);
+        officialText(ctx, data.unit, startX + valueWidth + p.unitOffsetLeft, p.valueY + p.unitOffsetTop, unitFs, st.unitColor, st.unitWeight);
+        // 图标+文字描述也在区域内居中
+        const iconW = 20;
+        const iconGap = 6;
+        const labelTextW = officialGetWidth(ctx, data.text, st.textSize, st.textWeight);
+        const hasIcon = data.icon && officialAssets[data.icon] && officialAssets[data.icon].complete && officialAssets[data.icon].naturalWidth > 0;
+        const labelTotalW = (hasIcon ? iconW + iconGap : 0) + labelTextW;
+        const labelStartX = sideCenterX - labelTotalW / 2;
         const icon = officialAssets[data.icon];
-        if (icon && icon.complete && icon.naturalWidth > 0) ctx.drawImage(icon, p.iconX, p.iconY, 20, 20);
+        if (hasIcon) ctx.drawImage(icon, labelStartX, p.iconY, iconW, iconW);
+        officialText(ctx, data.text, labelStartX + (hasIcon ? iconW + iconGap : 0), p.textY, st.textSize, st.textColor, st.textWeight);
       };
       drawMain(main);
       drawSide(sub1, 'subData1');

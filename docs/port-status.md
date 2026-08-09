@@ -168,3 +168,10 @@
 - 修复：overlay 主动注入 @font-face（同源 JZFSSans-Light otf，font-weight 100-900），
   并在每次推帧前 ensureFontsReady()。
 - 验证：首页 document.fonts.check('70px JZFS-Sans')=true；自动恢复推帧正常。
+
+## 副数据边界内居中（2026-08-10）
+
+- subData1/subData2 的数值+单位、图标+文字描述均在各自区域内水平居中。
+- 横屏区域：211~310（中心 260.5）；竖屏 sub1 23~127、sub2 135~229。
+- 自适应缩放：副数据超宽时字号逐级缩小（最小 20px）。
+- 验证：横屏 sub1 中心 261≈260.5、sub2 253≈260.5；竖屏局部中心映射正确。
