@@ -1,5 +1,18 @@
 # DeepCool 1.2.12 Arch Linux 移植实验
 
+> **Description（仓库简介）**
+>
+> 将 DeepCool 官方 Windows 软件（NSIS + Electron 23 + Vue 3）解包移植到
+> Arch Linux：原生启动官方 UI，接入 Linux 实时传感器，并把官方 L122
+> “数字模式”LCD 布局（背景/图标/字体/居中/亮度）原样渲染到 320×240
+> 水冷屏。支持官方预设组合、图片上传、开机自启与后台托盘运行。
+>
+> - 中文短描述：**DeepCool 官方 Windows 软件的 Arch Linux 移植版 —— 原生 UI、
+>   真实传感器、官方 LCD 布局渲染与后台运行。**
+> - English: **Arch Linux port of the official DeepCool (1.2.12) Windows app:
+>   native Electron UI, live Linux sensors, official LM-Series LCD layout,
+>   and background/tray operation.**
+
 把目录中的 `DeepCool-1.2.12-setup.exe` 解包，在 Arch Linux 上用原生
 Electron 23.3.13 启动官方 DeepCool 界面，并把 Linux 传感器与当前
 LM-Series LCD daemon 接到官方 UI。
