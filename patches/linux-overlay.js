@@ -421,6 +421,7 @@
           } else {
             startLoop('preset');
           }
+          syncZenButton();
         }
         // 持久化，重启后自动恢复
         invoke('linux/preset-save', cfg).catch(() => {});
@@ -498,9 +499,14 @@
     const root = document.createElement('div');
     root.id = 'dc-linux-bridge';
     root.innerHTML = `
-      <button data-act="zen" title="让 LCD 进入待机">待机</button>
+      <button data-act="zen" title="让 LCD 进入待机（再点恢复）">待机</button>
       <span class="dc-linux-dot" title="Linux bridge 状态"></span>
     `;
+    const zenBtn = root.querySelector('button[data-act="zen"]');
+    function syncZenButton() {
+      zenBtn.textContent = zenActive ? '恢复' : '待机';
+      zenBtn.title = zenActive ? 'LCD 待机中，点击恢复' : '让 LCD 进入待机（再点恢复）';
+    }
     const style = document.createElement('style');
     style.textContent = `
       #dc-linux-bridge{position:fixed;right:18px;bottom:16px;z-index:2147483647;display:flex;gap:7px;align-items:center;padding:7px 9px;border:1px solid rgba(53,224,255,.28);border-radius:11px;background:rgba(4,10,20,.9);box-shadow:0 10px 32px rgba(0,0,0,.38);backdrop-filter:blur(12px);font-family:system-ui,sans-serif}
@@ -558,13 +564,27 @@
     }
 
     // 进入待机（Zen）：停推帧 + 置标志 + 通知 daemon。官方"禅状态"开关与
-    // 浮层"待机"按钮共用此逻辑；恢复由 modelConfigurationSet(zenMode:false) 触发。
+    // 浮层"待机"按钮共用此逻辑。
     async function enterZen() {
       stopLoop();
       zenActive = true;
       // 待机期间保持 hold，防止状态轮询把 daemon 切回 monitor。
       await invoke('linux/hold-state', true).catch(() => {});
       await invoke('linux/daemon-command', { action: 'zen' }).catch(() => {});
+      syncZenButton();
+    }
+
+    // 退出待机：恢复推帧（预设/最近画面）。浮层"待机"按钮再点一次触发；
+    // 官方"禅状态"开关关闭时由 modelConfigurationSet(zenMode:false) 走 startLoop。
+    async function exitZen() {
+      zenActive = false;
+      await invoke('linux/hold-state', false).catch(() => {});
+      if (presetConfig && presetConfig.modeChange === 1 && lastFrameDataUrl) {
+        startImageLoop(lastFrameDataUrl);
+      } else {
+        startLoop('preset');
+      }
+      syncZenButton();
     }
 
     async function run(button, action) {
@@ -572,7 +592,11 @@
       const old = button.textContent;
       try {
         if (action === 'zen') {
-          await enterZen();
+          if (zenActive) {
+            await exitZen();
+          } else {
+            await enterZen();
+          }
         }
         button.textContent = '完成';
       } catch (error) {
@@ -580,7 +604,11 @@
         console.error('[DeepCool Linux bridge]', error);
         alert(error && error.message ? error.message : String(error));
       } finally {
-        setTimeout(() => { button.textContent = old; button.disabled = false; }, 1100);
+        setTimeout(() => {
+          if (action === 'zen') syncZenButton(); // 待机/恢复 状态按钮
+          else button.textContent = old;
+          button.disabled = false;
+        }, 1100);
         refresh();
         refreshAuto();
       }
