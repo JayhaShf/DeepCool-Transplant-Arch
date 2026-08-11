@@ -30,7 +30,7 @@
       };
       switch (String(name || '').toLowerCase()) {
         case 'cpu temperature': case 'cpu temp': return { v: round(s.cpu_temp), u: '°C', big: true };
-        case 'cpu frequency': case 'cpu freq': return { v: round(Number(s.cpu_freq) || 0, 1), u: 'GHZ', big: false };
+        case 'cpu frequency': case 'cpu freq': return { v: round(Number(s.cpu_freq) || 0, 1), u: 'GHz', big: false };
         case 'cpu power': return { v: round(s.cpu_power, 0), u: 'W', big: false };
         case 'cpu load': case 'cpu usage': return { v: round(s.cpu_usage), u: '%', big: false };
         case 'gpu temperature': case 'gpu temp': return { v: round(s.gpu_temp), u: '°C', big: true };
@@ -42,25 +42,6 @@
         case 'time': return { v: s.local_time || '--:--', u: '', big: false };
         default: return { v: '--', u: '', big: false };
       }
-    }
-
-    function drawBase(ctx, config, status) {
-      const d = (config && config.digitalData) || {};
-      const orientation = Number(d.orientation) || 0;
-      if (orientation === 90 || orientation === 270) {
-        ctx.translate(160, 120);
-        ctx.rotate(orientation === 90 ? Math.PI / 2 : -Math.PI / 2);
-        ctx.translate(-160, -120);
-      } else if (orientation === 180) {
-        ctx.translate(160, 120);
-        ctx.rotate(Math.PI);
-        ctx.translate(-160, -120);
-      }
-      const bg = ctx.createLinearGradient(0, 0, 0, 240);
-      bg.addColorStop(0, '#050914');
-      bg.addColorStop(1, '#101827');
-      ctx.fillStyle = bg;
-      ctx.fillRect(0, 0, 320, 240);
     }
 
     // ===== 官方 L122 数字模式渲染（反编译自 DeepCool 1.2.12）=====
@@ -271,58 +252,20 @@
       return canvas;
     }
 
-    function drawOfficialProgress(ctx, x, y, bars, size) {
-      // 官方进度条：按 20% 一格的方块
-      for (let i = 0; i < 5; i++) {
-        const on = i < bars;
-        ctx.fillStyle = on ? '#6CD7E1' : 'rgba(255,255,255,0.12)';
-        ctx.fillRect(x + i * (size + 3), y, size, size);
-      }
-    }
-
     function drawPreset(config, status) {
       // 使用官方 L122 数字模式渲染（背景/图标/坐标/字体与官方一致）
       return drawOfficialPreset(config, status);
-      const main = fieldValue(status, fields[0]);
-      const sub1 = fieldValue(status, fields[1]);
-      const sub2 = fieldValue(status, fields[2]);
-      const roundRect = (x, y, w, h, r) => {
-        ctx.beginPath();
-        ctx.moveTo(x + r, y);
-        ctx.arcTo(x + w, y, x + w, y + h, r);
-        ctx.arcTo(x + w, y + h, x, y + h, r);
-        ctx.arcTo(x, y + h, x, y, r);
-        ctx.arcTo(x, y, x + w, y, r);
-        ctx.closePath();
-      };
-      ctx.fillStyle = '#0b1220'; ctx.strokeStyle = '#1b2840'; ctx.lineWidth = 1;
-      roundRect(16, 36, 288, 118, 14); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = '#7d8fb0'; ctx.font = '12px sans-serif';
-      ctx.fillText(fields[0] || 'MAIN', 34, 60);
-      ctx.fillStyle = '#35e0ff'; ctx.font = '600 46px sans-serif';
-      const mainText = `${main.v}`;
-      const mainWidth = ctx.measureText(mainText).width;
-      ctx.fillText(mainText, 34, 120);
-      if (main.u) {
-        ctx.fillStyle = '#dbe7f5'; ctx.font = '600 20px sans-serif';
-        ctx.fillText(main.u, 40 + mainWidth, 116);
+    }
+
+    function drawOfficialProgress(ctx, x, y, bars, size) {
+      // 官方进度条：按 20% 一格的方块；竖屏时收敛起点防越界（画布宽 240）
+      const maxX = ctx.canvas ? ctx.canvas.width : 320;
+      const startX = Math.min(x, maxX - 5 * (size + 3) + 3);
+      for (let i = 0; i < 5; i++) {
+        const on = i < bars;
+        ctx.fillStyle = on ? '#6CD7E1' : 'rgba(255,255,255,0.12)';
+        ctx.fillRect(startX + i * (size + 3), y, size, size);
       }
-      [['SUB1', sub1, 16, 164, 140, '#a78bfa'], ['SUB2', sub2, 164, 164, 140, '#35e0ff']].forEach(([label, item, x, y, w, color]) => {
-        ctx.fillStyle = '#0b1220'; ctx.strokeStyle = '#1b2840';
-        roundRect(x, y, w, 62, 12); ctx.fill(); ctx.stroke();
-        ctx.fillStyle = '#7d8fb0'; ctx.font = '11px sans-serif';
-        ctx.fillText(label, x + 14, y + 21);
-        ctx.fillStyle = color; ctx.font = '600 26px sans-serif';
-        const t = `${item.v}`;
-        ctx.fillText(t, x + 14, y + 49);
-        if (item.u) {
-          ctx.fillStyle = '#dbe7f5'; ctx.font = '600 13px sans-serif';
-          ctx.fillText(item.u, x + 18 + ctx.measureText(t).width, y + 48);
-        }
-      });
-      ctx.fillStyle = '#4a5b78'; ctx.font = '9px sans-serif';
-      ctx.fillText(status && status.snapshot ? status.snapshot.local_time : '', 268, 24);
-      return canvas;
     }
 
 
@@ -342,19 +285,34 @@
     async function pushCanvas(canvas) {
       applyBrightness(canvas);
       const dataUrl = canvas.toDataURL('image/png');
-      lastFrameDataUrl = dataUrl;
-      const result = await invoke('linux/push-image', dataUrl);
-      if (!result || !result.ok) throw new Error((result && result.error) || '推送失败');
+      return pushDataUrl(dataUrl);
+    }
+
+    // 统一推帧入口（preset/preview/image 三路共用）：亮度遮罩、lastFrameDataUrl、
+    // 推送前模式复查、in-flight 防堆叠全部在此处理。
+    let frameBusy = false; // 上一帧未完成时跳过本 tick（daemon 慢时不并发堆积）
+    async function pushDataUrl(dataUrl, expectedMode) {
+      if (frameBusy) return false;
+      frameBusy = true;
+      try {
+        // 推屏前复查：期间 stopLoop/startLoop 切换了模式则放弃旧帧
+        if (expectedMode !== undefined && (!active || currentMode !== expectedMode)) return false;
+        lastFrameDataUrl = dataUrl;
+        const result = await invoke('linux/push-image', dataUrl);
+        if (!result || !result.ok) throw new Error((result && result.error) || '推送失败');
+        return true;
+      } finally {
+        frameBusy = false;
+      }
     }
 
     async function pushFrame(mode) {
       try {
+        if (frameBusy) return;
         await ensureFontsReady();
         const status = await invoke('linux/status');
         if (!active || currentMode !== mode) return;
-        let canvas;
-        if (mode === 'preset') canvas = drawPreset(presetConfig, status);
-        else canvas = drawMonitor(status);
+        const canvas = drawPreset(presetConfig, status);
         if (!active || currentMode !== mode) return;
         await pushCanvas(canvas);
       } catch (error) {
@@ -369,7 +327,8 @@
       currentMode = mode;
       invoke('linux/hold-state', true).catch(() => {});
       pushFrame(mode);
-      timer = setInterval(() => pushFrame(mode), 3000);
+      // 推帧周期 1 秒（LCD 每秒刷新一次）
+      timer = setInterval(() => pushFrame(mode), 1000);
     }
 
     function stopLoop() {
@@ -393,20 +352,15 @@
       ]);
       // 若 await 期间已有循环激活（如用户保存预设），则放弃本次预览。
       if (active) return;
-      lastFrameDataUrl = dataUrl;
       stopLoop();
       active = true;
       currentMode = 'preview';
       invoke('linux/hold-state', true).catch(() => {});
-      const push = async () => {
-        if (!active || currentMode !== 'preview') return;
-        try {
-          const result = await invoke('linux/push-image', dataUrl);
-          if (!result || !result.ok) throw new Error(result && result.error || '推送失败');
-        } catch (error) { console.error('[DeepCool Linux] preview push failed:', error); }
-      };
-      await push();
-      timer = setInterval(push, 3000);
+      const push = () => pushDataUrl(dataUrl, 'preview');
+      const firstOk = await push();
+      // 复查模式后再建 interval：await 期间若被 startLoop 接管，不建空转 timer
+      if (!firstOk || !active || currentMode !== 'preview') return;
+      timer = setInterval(push, 1000);
       } finally {
         previewStarting = false;
       }
@@ -418,17 +372,10 @@
       zenActive = false;
       active = true;
       currentMode = 'image';
-      lastFrameDataUrl = dataUrl;
       invoke('linux/hold-state', true).catch(() => {});
-      const push = async () => {
-        if (!active || currentMode !== 'image') return;
-        try {
-          const result = await invoke('linux/push-image', dataUrl);
-          if (!result || !result.ok) throw new Error((result && result.error) || '推送失败');
-        } catch (error) { console.error('[DeepCool Linux] image push failed:', error); }
-      };
+      const push = () => pushDataUrl(dataUrl, 'image');
       push();
-      timer = setInterval(push, 3000);
+      timer = setInterval(push, 1000);
     }
 
     // 统一渲染：软件预览（l122/image-transmission）直接显示最近推送到 LCD 的
@@ -437,6 +384,19 @@
       // 官方 image-transmission 期望直接返回 data URL 字符串（页面直接绑 img.src）
       if (channel === 'l122/image-transmission' && lastFrameDataUrl) {
         return lastFrameDataUrl;
+      }
+      // 官方"开机自启动"开关：app/set-setting {launch} → Linux XDG autostart。
+      // 写文件后仍透传官方 main（Windows 桩，无害），让官方受控组件正常完成
+      // 状态更新——不能短路返回，否则官方内部 model 与显示脱节，下次点击反向。
+      if (channel === 'app/set-setting' && args[0] && typeof args[0] === 'object' && 'launch' in args[0]) {
+        const want = args[0].launch === true || args[0].launch === 'true';
+        const result = await invoke('linux/autostart-set', { enabled: want }).catch((error) => ({
+          ok: false, error: error.message || String(error),
+        }));
+        if (!result || !result.ok) {
+          return { code: 500, message: (result && result.error) || '开机自启设置失败', data: null };
+        }
+        return invoke(channel, ...args); // 透传官方（桩返回成功结构，官方 handler 正常收尾）
       }
       const result = await invoke(channel, ...args);
       if (channel === 'l122/modelConfigurationSearch' && result && result.data) {
@@ -447,7 +407,21 @@
         const cfg = args[0] || presetConfig;
         presetConfig = cfg;
         if (cfg && cfg.brightnessControl !== undefined) lastBrightness = cfg.brightnessControl;
-        startLoop('preset');
+        lastModeChange = cfg ? Number(cfg.modeChange) : 0; // 同步模式基线
+        // 官方"禅状态"开关 → 待机（LCD 关闭，不推帧）；关闭则恢复推帧。
+        if (cfg && cfg.zenMode === true) {
+          enterZen();
+        } else {
+          zenActive = false;
+          // 多媒体模式（modeChange=1）：LCD 显示当前媒体图（若已上传图片），
+          // 否则显示最近一帧（lastFrameDataUrl）。数字模式（modeChange=0）推预设。
+          if (cfg && cfg.modeChange === 1 && lastFrameDataUrl) {
+            // 若当前就是图片循环则保持；否则切到图片显示
+            if (currentMode !== 'image') startImageLoop(lastFrameDataUrl);
+          } else {
+            startLoop('preset');
+          }
+        }
         // 持久化，重启后自动恢复
         invoke('linux/preset-save', cfg).catch(() => {});
       }
@@ -457,6 +431,31 @@
       }
       return result;
     };
+
+    // 检测官方"数字模式/多媒体模式"切换：官方切换是纯前端点击（不触发
+    // modelConfigurationSet），在捕获阶段监听点击，命中"数字模式/多媒体模式"
+    // 文本时更新 presetConfig.modeChange 并同步 LCD 显示模式。
+    let lastModeChange = null;
+    function applyModeChange(mc) {
+      if (mc === lastModeChange) return;
+      lastModeChange = mc;
+      if (presetConfig) presetConfig.modeChange = mc;
+      console.log('[DeepCool Linux] modeChange:', mc);
+      if (zenActive) return;
+      if (mc === 1 && lastFrameDataUrl) {
+        // 多媒体模式：显示当前媒体图/最近帧
+        startImageLoop(lastFrameDataUrl);
+      } else if (mc === 0) {
+        startLoop('preset');
+      }
+    }
+    document.addEventListener('click', (event) => {
+      const el = event.target && event.target.closest ? event.target.closest('div,span,button,li') : null;
+      if (!el) return;
+      const text = (el.textContent || '').trim();
+      if (text === '多媒体模式') { applyModeChange(1); return; }
+      if (text === '数字模式') { applyModeChange(0); return; }
+    }, true); // 捕获阶段：先于官方 Vue handler，且官方 handler 不改变同步结果
 
     // 推送预览集成到软件：进入 LM-Series 页面后自动把页面预览截图推送到 LCD
     // （立即生效，无需任何按钮）；离开页面或激活预设/图片后自动停止/让位。
@@ -476,8 +475,14 @@
         if (saved && saved.digitalData && !active && !zenActive) {
           presetConfig = saved;
           if (saved.brightnessControl !== undefined) lastBrightness = saved.brightnessControl;
-          startLoop('preset');
-          console.log('[DeepCool Linux] restored preset:', saved.digitalData);
+          lastModeChange = Number(saved.modeChange); // 恢复模式基线
+          // 多媒体模式恢复图片显示；数字模式恢复预设推帧
+          if (saved.modeChange === 1 && lastFrameDataUrl) {
+            startImageLoop(lastFrameDataUrl);
+          } else {
+            startLoop('preset');
+          }
+          console.log('[DeepCool Linux] restored preset:', saved.digitalData, 'modeChange:', saved.modeChange);
         }
       } catch (error) {
         console.error('[DeepCool Linux] restore preset failed:', error);
@@ -488,7 +493,8 @@
     setTimeout(ensureAutoPreview, 1200);
     setInterval(ensureAutoPreview, 1000);
 
-    // ---- Linux 控制浮层 ----
+    // ---- Linux 控制浮层（精简）：官方 UI 已含"禅状态/开机自启动"开关，
+    // 浮层只保留快捷待机按钮 + 状态点。 ----
     const root = document.createElement('div');
     root.id = 'dc-linux-bridge';
     root.innerHTML = `
@@ -509,6 +515,37 @@
     document.body.appendChild(root);
     const dot = root.querySelector('.dc-linux-dot');
 
+    // ---- 官方"设置 → 启动设置 → 开机自启动"开关（el-switch）桥接 ----
+    // 官方开关是受控组件（不产生 DOM change），交互唯一入口是
+    // invoke('app/set-setting', {launch: bool})，在下方 invoke 包装器里拦截；
+    // 这里只做显示校准：进入设置页时按真实 autostart 状态覆盖开关显示。
+    const OFFICIAL_SWITCH = '.setting .el-switch input';
+    function officialSwitchInput() {
+      return document.querySelector(OFFICIAL_SWITCH);
+    }
+    async function syncOfficialAutostartSwitch() {
+      if (!location.hash.startsWith('#/setting')) return;
+      const input = officialSwitchInput();
+      if (!input) return;
+      try {
+        const st = await invoke('linux/autostart-status');
+        if (input.checked !== st.enabled) {
+          // 显示与真实状态不一致：先经官方通道把官方内部状态校准为真实值
+          // （app/set-setting 会被下方拦截器幂等写文件并返回成功，官方 M 同步），
+          // 再校准显示——否则官方 M 与显示脱节，用户点击会发出反向 launch。
+          await invoke('app/set-setting', { launch: st.enabled });
+          if (input.checked !== st.enabled) input.checked = st.enabled;
+          refreshAuto(); // 浮层按钮同步
+        }
+      } catch (_) {}
+    }
+
+    async function refreshAuto() {
+      // 浮层自启按钮已移除：autostart 状态由官方设置页开关（syncOfficialAutostartSwitch）
+      // 负责显示；此处保留为空实现以兼容调用点。
+      return;
+    }
+
     async function refresh() {
       try {
         const status = await invoke('linux/status');
@@ -520,16 +557,22 @@
       }
     }
 
+    // 进入待机（Zen）：停推帧 + 置标志 + 通知 daemon。官方"禅状态"开关与
+    // 浮层"待机"按钮共用此逻辑；恢复由 modelConfigurationSet(zenMode:false) 触发。
+    async function enterZen() {
+      stopLoop();
+      zenActive = true;
+      // 待机期间保持 hold，防止状态轮询把 daemon 切回 monitor。
+      await invoke('linux/hold-state', true).catch(() => {});
+      await invoke('linux/daemon-command', { action: 'zen' }).catch(() => {});
+    }
+
     async function run(button, action) {
       button.disabled = true;
       const old = button.textContent;
       try {
         if (action === 'zen') {
-          stopLoop();
-          zenActive = true;
-          // 待机期间保持 hold，防止状态轮询把 daemon 切回 monitor。
-          await invoke('linux/hold-state', true).catch(() => {});
-          await invoke('linux/daemon-command', { action: 'zen' });
+          await enterZen();
         }
         button.textContent = '完成';
       } catch (error) {
@@ -539,6 +582,7 @@
       } finally {
         setTimeout(() => { button.textContent = old; button.disabled = false; }, 1100);
         refresh();
+        refreshAuto();
       }
     }
 
@@ -547,7 +591,11 @@
       if (button) run(button, button.dataset.act);
     });
     refresh();
+    refreshAuto();
+    syncOfficialAutostartSwitch();
     setInterval(refresh, 5000);
+    setInterval(refreshAuto, 5000);
+    setInterval(syncOfficialAutostartSwitch, 2000);
 
     window.__dcPresetDebug = {
       active: () => active,
