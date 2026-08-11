@@ -1,11 +1,12 @@
-# DeepCool 1.2.12 Arch Linux 移植实验
+# DeepCool 1.2.12 Arch Linux 移植版
 
 > **Description（仓库简介）**
 >
 > 将 DeepCool 官方 Windows 软件（NSIS + Electron 23 + Vue 3）解包移植到
 > Arch Linux：原生启动官方 UI，接入 Linux 实时传感器，并把官方 L122
-> “数字模式”LCD 布局（背景/图标/字体/居中/亮度）原样渲染到 320×240
-> 水冷屏。支持官方预设组合、图片上传、开机自启与后台托盘运行。
+> "数字模式"LCD 布局（背景/图标/字体/居中/亮度）原样渲染到 320×240
+> 水冷屏。支持官方预设组合、图片上传、数字/多媒体模式、禅状态待机、
+> 开机自启与后台托盘运行。LCD 由本仓库自带 Python daemon 驱动。
 >
 > - 中文短描述：**DeepCool 官方 Windows 软件的 Arch Linux 移植版 —— 原生 UI、
 >   真实传感器、官方 LCD 布局渲染与后台运行。**
@@ -17,14 +18,14 @@
 Electron 23.3.13 启动官方 DeepCool 界面，并把 Linux 传感器与当前
 LM-Series LCD daemon 接到官方 UI。
 
-## 已验证结果（2026-08-09）
+## 已验证结果
 
 - 安装包：NSIS 3，内含 7z payload；官方应用是 Electron 23.3.13 + Vue 3。
 - 主进程：`out/main/index.jsc`（V8 字节码），必须使用匹配的 Electron/V8。
 - 当前真机：USB `3633:0026`，产品 `LM-Series`，Bulk OUT `0x01`、IN `0x81`。
 - 官方 UI：可原生启动；仪表盘、设备列表和 LM-Series 页面均已验证。
 - Linux 实时数据：CPU/GPU 温度、负载、频率、功耗、显存、内存、磁盘和网络已接入。
-- LCD：底部 Linux 浮层提供推送预览、待机、Linux 控制台；官方预设/上传图片/推送预览时把当前项目画面推送到 320×240 LCD。
+- LCD：官方预设/上传图片/推送预览时把当前项目画面推送到 320×240 LCD。
 
 当前验证截图：
 
@@ -35,6 +36,10 @@ LM-Series LCD daemon 接到官方 UI。
 LM-Series 官方设备页（含 Linux 桥）：
 
 ![DeepCool Linux LM-Series](screenshots/deepcool-linux-lm-series-v2.png)
+
+官方布局 LCD 帧：
+
+![官方布局帧](screenshots/deepcool-lcd-frame-official-v2.png)
 
 ## 为什么不能直接运行 Windows 包
 
@@ -50,7 +55,7 @@ Linux 无法直接加载它们。本项目用 JavaScript 桩让字节码主进�
 
 1. 从 `/run/deepcool-lm/deepcool-lm.sock` 读取真实传感器；
 2. 保留官方 USB 枚举与 LM-Series 配置 UI；
-3. 使用已安装的 `deepcool-lm-daemon` 完成实际 LCD 写入。
+3. 使用本仓库 Python daemon 完成实际 LCD 写入。
 
 ## 运行
 
@@ -75,54 +80,42 @@ npm run verify
 
 ## 桌面启动速度
 
-- 启动脚本现在直接使用 `node_modules/electron/dist/electron`（ELF），不再经过
+- 启动脚本直接使用 `node_modules/electron/dist/electron`（ELF），不再经过
   `node` 包装脚本，也不依赖桌面环境的 `PATH` 里是否有 node。
 - 已打过补丁时不再每次重新执行 `prepare.sh`。
-- 加入单实例锁：应用已运行时再点桌面图标，会直接聚焦已有窗口并立即退出新进程，
-  不会卡在 Chromium profile 锁上等待（这是桌面重复点击“启动很慢”的主要原因）。
-- 桌面入口增加 `StartupNotify=true`，窗口出现前桌面环境会显示启动反馈。
+- 加入单实例锁：应用已运行时再点桌面图标，会直接聚焦已有窗口并立即退出新进程。
+- 桌面入口增加 `StartupNotify=true`。
+- `run.sh` 内置启动重试：CDP 未就绪且进程退出时自动重试（pkill 后立即重启也稳）。
 
 实测：干净启动到 CDP/页面就绪约 0.3–0.4 秒；重复点击立即聚焦已有窗口。
 
-### 修复“一直停在初始加载页”
+### 修复"一直停在初始加载页"
 
 官方主进程要等 Windows 原生 `ready.node` 完成握手，才会从 `launch.html`
-（初始加载页）切到 `index.html` 主界面。Linux 桩无法触发该握手，因此以前会
-一直停留在加载页。兼容层现在在 `app.whenReady()` 后强制完成过渡：
+切到 `index.html` 主界面。Linux 桩无法触发该握手，兼容层在 `app.whenReady()`
+后强制完成过渡（发送 `worker/ready`、关闭 `launch.html`、显示主窗口）。
 
-1. 向渲染进程发送官方 `worker/ready` 事件；
-2. 关闭 `launch.html` 加载窗口；
-3. 显示并聚焦主窗口（`index.html`）。
+## 功能总览（官方 UI 内控制）
 
-当前窗口已验证：只剩主界面一个窗口，`launch.html` 已关闭。
+所有 Linux 桥功能都已集成到官方 UI 的对应控件，无需额外操作：
 
-## 重启软件自动恢复 LCD 显示（修复）
+| 功能 | 官方位置 | 行为 |
+|---|---|---|
+| **禅状态（LCD 待机）** | `设备 → LM-Series → 禅状态` 开关 | 打开 → LCD 黑屏待机（daemon zen）；关闭 → 恢复推帧 |
+| **开机自启动** | `设置 → 启动设置 → 开机自启动` 开关 | 写/删 `~/.config/autostart/deepcool-official-linux.desktop`（登录后后台运行） |
+| **数字/多媒体模式** | `个性化设置 → 数字模式/多媒体模式` | 多媒体 → LCD 显示图片/最近帧；数字 → 官方数字布局推帧 |
+| **调整显示数据** | `个性化设置 → 调整显示数据` | 主/副数据组合实时重绘 LCD（CPU/GPU/内存等字段） |
+| **图片上传** | LM-Series 媒体区 | 选图 → 裁剪缩放 320×240 → LCD 显示图片 |
+| **推送预览** | 进入 LM-Series 页面自动 | 页面预览截图推送到 LCD，每秒刷新 |
 
-- 之前重启软件后 `presetConfig` 丢失，LCD 只剩纯色/黑屏，需要手动重新切换
-  个性化设置才会恢复。
-- 现在保存个性化设置时会写入 `preset.json`（userData），重启软件后自动读取并
-  恢复该预设推帧（含亮度），无需手动操作。
-- 验证：设置 GPU监控（亮度60）→ 重启 → 自动恢复 preset 模式、daemon static、
-  推帧持续。
-
-## 关闭窗口 = 后台运行（适配 Niri Super+Q）
-
-- 按 **Super+Q**（或窗口管理器关闭/点击窗口关闭按钮）**不会退出程序**，
-  而是隐藏到系统托盘继续后台运行；
-- LCD 渲染/推帧、传感器轮询不受影响（已禁用渲染节流）；
-- 恢复窗口：
-  - 点击系统托盘 DeepCool 图标（左键切换显示/隐藏）；
-  - 右键托盘 → “显示主界面”；
-  - 再次运行 `deepcool-official-linux`（单实例会显示已有窗口）；
-- 真正退出：托盘右键 → “退出”（设置 isQuitting 后 app.quit()）；
-- 系统注销/关机时 before-quit 会正常放行退出。
+右下角保留一个精简浮层：**"待机"快捷按钮** + 状态指示灯
+（🟢 daemon 正常 / 🔴 不可用）。
 
 ## 开机自启 + 后台运行
 
 登录后自动以后台模式启动（窗口隐藏、系统托盘图标、LCD 推帧继续）：
 
 ```bash
-cd "$(dirname "$(readlink -f "$0")")"  # 或 cd 到本仓库目录
 npm run install:autostart
 ```
 
@@ -132,7 +125,11 @@ npm run install:autostart
 npm run uninstall:autostart
 ```
 
-手动后台启动一次：
+**软件内控制**（官方样式）：
+- 官方设置页 `设置 → 启动设置 → 开机自启动` 开关已桥接（与命令行脚本同一文件）；
+- 未安装启动器时会提示先运行 `npm run install:user`。
+
+手动后台启动：
 
 ```bash
 deepcool-official-linux --hidden
@@ -143,9 +140,19 @@ npm run background
 说明：
 
 - 后台模式会禁用渲染节流（`setBackgroundThrottling(false)`），隐藏窗口时
-  LCD 预设/图片推帧仍然每 3 秒持续；
+  LCD 预设/图片推帧仍然每秒持续；
 - 系统托盘图标：点击切换显示/隐藏，右键菜单可显示主界面或退出；
-- 应用已运行时再次启动会聚焦/显示已有窗口（单实例锁），不会重复后台进程。
+- 应用已运行时再次启动会聚焦/显示已有窗口（单实例锁）。
+
+## 关闭窗口 = 后台运行（适配 Niri Super+Q）
+
+- 按 **Super+Q**（或窗口管理器关闭/点击关闭按钮）**不会退出程序**，而是隐藏
+  到系统托盘继续后台运行；
+- LCD 渲染/推帧、传感器轮询不受影响；
+- 恢复窗口：点击托盘图标 / 右键"显示主界面" / 再次运行
+  `deepcool-official-linux`；
+- 真正退出：托盘右键 → "退出"；
+- 系统注销/关机时 `before-quit` 正常放行。
 
 ## 安装到当前用户的应用菜单
 
@@ -165,24 +172,14 @@ deepcool-official-linux
 npm run uninstall:user
 ```
 
-## LCD 操作
-
-官方窗口右下角增加了四个 Linux 桥按钮：
-
-- **推送预览已集成到软件**：进入 `设备 → LM-Series` 页面后，自动把页面预览
-  截图推送到 LCD（立即生效，无需任何按钮）；
-- **待机**：右下角唯一按钮，LCD 进入 Zen/待机并保持关闭（不会被自动预览打扰），
-  保存预设/上传图片后自动恢复；
-- ~~Linux 控制台~~：已移除；
-- ~~监控~~：已移除（不再有监控画面/监控按钮）。
-
 ## 依赖
 
 - Arch Linux x86_64
 - `7z`（当前系统命令来自 `7zip`）
 - Node/npm（仅用于准备 Electron 运行时）
 - 本项目锁定 `electron@23.3.13`
-- 实际 LCD 控制依赖当前已安装并运行的 `deepcool-lm-rust` / `deepcool-lm-daemon`
+- 实际 LCD 控制依赖本仓库自带的 Python daemon（`daemon/deepcool-lm-daemon.py`，
+  依赖 `python-pyusb` / `python-psutil` / `python-pillow`）
 
 检查：
 
@@ -194,28 +191,48 @@ ls -l /run/deepcool-lm/deepcool-lm.sock
 
 ## LCD 内容由谁渲染（当前架构）
 
-- **原生 Slint 画面**：由 `/usr/bin/deepcool-lm-daemon`（systemd root 进程）内嵌的
-  `deepcool-lm-slint` 软件渲染器渲染，不依赖浏览器/GPU；monitor/auto 模式下每 2 秒
-  渲染 320×240 RGB565 帧并直接写 USB。
+- **daemon**：本仓库 `daemon/deepcool-lm-daemon.py`（Python，systemd root 进程）。
+  无原生渲染：monitor/zen 模式 LCD 纯黑，传感器始终实时采样
+  （snapshot 经 `/run/deepcool-lm/deepcool-lm.sock` 提供给移植层）。
 - **当前项目渲染**：官方 DeepCool UI 移植层（`linux-overlay.js`）用浏览器 Canvas
-  生成 320×240 预设画面，经 `linux/push-image` 推给 daemon，daemon 进入 `static`
-  模式只负责重复发送该帧，不参与内容生成。
-- `deepcool-lm-web` 只是 HTTP 控制台/API，不渲染 LCD。
+  生成 320×240 预设画面，经 `linux/push-image` 推给 daemon，daemon 把 PNG
+  转 RGB565 重复发送该帧，不参与内容生成。
 
-## 调整显示数据（已验证生效）
+## daemon（Python 重写版）
 
-官方“个性化设置 → 调整显示数据”（主数据/辅助数据/推荐组合）保存后即生效：
-overlay 捕获 `l122/modelConfigurationSet`，按 `digitalData` 组合重绘 320×240 预设画面
-并推屏，软件预览与 LCD 同步。支持字段：CPU 温度/功耗/负载/频率、时间、
-GPU 温度/功耗、内存负载（Memory Load，已修复支持）。
+原 Rust daemon（`deepcool-lm-rust`）源码已丢失（重装系统 + GitHub 无备份），
+按移植层锁定的协议规格重写为 Python 单文件，协议完全兼容
+（socket JSON / snapshot 字段 / image 推帧 / zen / brightness）。USB 命令来自
+[daedlock/deepcool-lm](https://github.com/daedlock/deepcool-lm)（LM360 实测）。
 
-修复记录：官方“内存负载”选项原先在渲染层未映射，选中后 LCD 显示 `--`，
-已补充映射（显示内存百分比）。
+安装/重装：
 
-## 图片上传（Linux 实现，2026-08-09）
+```bash
+sudo bash daemon/install-daemon.sh
+# 或完整重装流程：
+sudo bash scripts/reinstall-daemon.sh
+```
 
-官方上传链路依赖 Windows DLL（文件对话框/opencv/L122 控制器），Linux 桩会导致
-UI 一直停在“处理中”。移植层已实现 Linux 上传：
+`install-daemon.sh` 会安装依赖（python-pyusb/python-psutil/python-pillow）、
+安装 systemd unit、启用启动 `deepcool-lm-daemon.service`（root 运行，
+自动重启，socket 0666，双实例保护）。详见 `daemon/README.md`。
+
+### daemon 协议摘要
+
+Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0666），JSON 请求：
+
+| 动作 | 参数 | 说明 |
+|---|---|---|
+| `status` | — | `{ok, mode, snapshot}`（snapshot 字段与 linux-compat 完全一致） |
+| `monitor` | — | 监控模式（LCD 黑屏 + 持续采样） |
+| `zen` | — | 待机（USB zen 命令 + 不推帧） |
+| `image` | `data`: PNG base64 | 320×240 RGB565 推帧，持续重发 |
+| `brightness` | `direction`: up/down | 硬件亮度步进 |
+
+## 图片上传（Linux 实现）
+
+官方上传链路依赖 Windows DLL（文件对话框/opencv/L122 控制器），Linux 桩会
+导致 UI 一直停在"处理中"。移植层已实现 Linux 上传：
 
 - `media/selectImg` / `selectGif` / `selectVideo`：改用 Electron 原生文件对话框；
 - `l122/uploadSelectedMedia` / `l122/modifyMedia`：用 Electron `nativeImage`
@@ -224,84 +241,53 @@ UI 一直停在“处理中”。移植层已实现 Linux 上传：
 - `l122/getAllMedia` / `deleteOneMedia`：维护内存媒体列表；
 - 视频上传/编辑：明确提示暂不支持（不再卡死）。
 
-## 官方 LCD 布局（已移植，2026-08-09）
+## 官方 LCD 布局（已移植）
 
 从官方 renderer（`index-8dc9d6df.js` 的 `L122Canvas2`）反编译并移植了官方
-“数字模式”LCD 渲染：
+"数字模式"LCD 渲染：
 
 - 背景：官方 `horizontal_bg-3de67705.png` / `vertical_bg-9219be0f.png`（已内嵌）；
 - 图标：官方 CPU / GPU / RAM 图标（已内嵌 data URL）；
 - 布局坐标、字号、颜色、进度条与官方完全一致（横屏 320×240，竖屏 240×320）；
 - 主数据 70px 大字 + 单位，副数据 40px，图标 20px，CPU/负载类带 5 格进度条；
-- 字体使用官方嵌入的 JZFS-Sans。
+- 字体使用官方嵌入的 JZFS-Sans（主动注册，首页/自动恢复推帧也一致）；
+- 主/副数据数值+单位在区域内水平居中，超宽自动缩字（不越界）。
 
-当前项目渲染的预设帧（320×240）：
-
-![官方布局帧](screenshots/deepcool-lcd-frame-official-v2.png)
-
-## 统一渲染（2026-08-09）
+## 统一渲染
 
 - **只有一套渲染**：`linux-overlay.js` 的 Canvas 渲染器。
 - 软件 LM-Series 页面预览（`l122/image-transmission`）不再由 main 进程生成 SVG，
   而是直接返回最近推送到 LCD 的同一张图（`lastFrameDataUrl`）。
-- LCD 与软件预览显示完全一致（已验证 `img.src === lastFrame`）。
-- main 进程中的 SVG 预览渲染已移除，改为静态占位。
+- LCD 与软件预览显示完全一致。
 
-## 只保留当前项目渲染（已默认启用）
+## 推帧周期
 
-`scripts/disable-native-render.sh` 会把 `/etc/deepcool-lm/lcd.json` 设为：
+- 预设/图片/预览推帧均为 **1 秒**刷新（`setInterval` 1000ms）；
+- 带 in-flight 保护（上一帧未完成跳过本 tick），daemon 慢时不并发堆积；
+- 亮度遮罩、lastFrameDataUrl、模式复查在统一推帧入口处理。
 
-```json
-{
-  "renderer": "rust",
-  "background": [0, 0, 0],
-  "pages": [{ "name": "blank", "widgets": [] }]
-}
-```
+## 重启软件自动恢复 LCD 显示
 
-效果：
+- 保存个性化设置时写入 `preset.json`（userData），重启后自动读取并恢复
+  该预设推帧（含亮度、数字/多媒体模式）。
+- 验证：设置 GPU监控（亮度60）→ 重启 → 自动恢复 preset 模式、daemon static、
+  推帧持续。
 
-- daemon 不再加载 Slint 渲染器；
-- monitor 模式渲染纯黑（没有任何原生监控画面）；
-- 官方预设/推送激活时进入 `static`，LCD 只显示当前项目推送的内容；
-- 传感器在 static 模式下依然实时（需要包含 static 采样的新版 daemon 包，
-  当前已安装的 21:27 构建已包含）。
+## 修复记录（本仓库）
 
-重新执行 `scripts/reinstall-daemon.sh` 后会自动再次应用该配置。
+详见 `docs/port-status.md`。近期的关键修复：
 
-## 官方预设的屏幕个性化设置（可用）
-
-官方 LM-Series 页面的“个性化设置 / 调整显示数据 / 推荐组合”现在会真正作用于 LCD：
-
-1. 在官方 UI 选择推荐组合（CPU监控 / GPU监控 / 功耗监控）或手动改主/副数据；
-2. 保存后，Linux 桥按官方 `digitalData` 组合实时生成 320×240 画面
-   （主数据大卡 + 两个副数据卡，支持 0/90/180/270 旋转）；
-3. 每 3 秒持续推送到 LCD（与官方 image-transmission 机制一致，无需 root）。
-
-已验证：模拟 CPU监控 / GPU监控 组合，daemon 返回 `图片已显示`，LCD 处于
-`static` 模式持续显示预设画面。
-
-已知限制：
-
-- 亮度滑块：当前 daemon 只支持 up/down 步进，无法设置绝对值，暂不映射；
-- 禅状态/强制禅：保存后桥会切到待机（Zen）；
-- 点击右下角“待机”可停止预设推帧并关闭 LCD；默认启动不推任何画面。
-
-## 注意：deepcool-lm-rust 包当前已被卸载
-
-当前系统里 `deepcool-lm-rust` 包已不在（`/usr/bin/deepcool-lm-daemon`
-文件被删除），但旧 daemon 进程仍在运行，所以预设推帧仍可工作。
-**系统重启后 LCD 控制会失效**，请尽快重装：
-
-```bash
-cd ~/Git/DeepCool-linux   # daemon 源码仓库
-MAKEPKG_NODEPS=1 ./packaging/build-rust-package.sh --nocheck
-cd "$(dirname "$(readlink -f "$0")")"  # 或 cd 到本仓库目录
-./scripts/reinstall-daemon.sh
-```
-
-`reinstall-daemon.sh` 会停止旧服务、安装新包、启用并重启
-`deepcool-lm-daemon` / `deepcool-lm-web`，并把当前用户加入 `deepcool` 组。
+- **GPU 显存显示**：nvidia-smi 返回 MiB 而消费方按字节换算 → daemon 侧
+  ×1048576 统一转字节，`memSize/memUsage` 恢复真实值（1.5GB/12GB）。
+- **stubs thenable 挂起**：`Promise.resolve(p)` 对 thenable 自我收养导致
+  `await` 永不返回 → 改为同步 resolve(undefined)。
+- **推帧并发堆积**：1 秒推帧加 in-flight 保护 + capture 4s 超时。
+- **多媒体模式**：捕获官方下拉点击，`modeChange` 实时切换 LCD 模式，
+  重启按保存的模式恢复。
+- **禅状态开关**：官方开关桥接 `linux/daemon-command zen`。
+- **开机自启**：官方设置页开关写/删 XDG autostart 文件（`app/set-setting`
+  拦截 + 状态校准）。
+- **CPU 频率单位**：daemon 上报 GHz，渲染层 ×1000 转 MHz 显示。
 
 ## 当前限制
 
@@ -309,13 +295,14 @@ cd "$(dirname "$(readlink -f "$0")")"  # 或 cd 到本仓库目录
 - Windows 控制器 `.node` DLL 没有被重新编译；官方 UI 中部分高级媒体、固件更新、
   Windows HWiNFO、屏幕捕获和风扇曲线功能仍由桩处理或禁用。
 - 官方 UI 的普通配置项会保存在自己的用户数据目录，但只有底部 Linux 桥明确连接
-  当前 Rust daemon；不要用此移植版刷固件。
+  当前 Python daemon；不要用此移植版刷固件。
 - Electron 23 已停止上游维护，仅建议把它用于此离线本机界面，不要加载不可信网页。
 - 安装包和官方素材版权属于 DeepCool；本目录只做本机分析与互操作，不应重新分发官方 payload。
 
 ## 目录
 
 ```text
+daemon/                   Python daemon（源码备份在本仓库，不再丢失）
 patches/                 字节码 loader、Windows .node 桩、Linux IPC 桥
 scripts/extract.sh       NSIS/7z/asar 解包
 scripts/prepare.sh       应用 Linux 补丁
@@ -323,5 +310,6 @@ scripts/run.sh           安全启动（会清理 Codex 导出的 ELECTRON_RENDE
 scripts/install-user.sh  用户级命令和 desktop entry
 screenshots/             本机验证截图
 docs/reverse-engineering.md  逆向记录
+docs/port-status.md      移植与修复记录
 work/                    解包与分析产物（不应提交/分发）
 ```
