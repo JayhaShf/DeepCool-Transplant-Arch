@@ -409,7 +409,11 @@
         if (cfg && cfg.brightnessControl !== undefined) lastBrightness = cfg.brightnessControl;
         lastModeChange = cfg ? Number(cfg.modeChange) : 0; // 同步模式基线
         // 官方"禅状态"开关 → 待机（LCD 关闭，不推帧）；关闭则恢复推帧。
-        if (cfg && cfg.zenMode === true) {
+        // 注意：切换数字/多媒体模式也会触发 modelConfigurationSet，且携带的
+        // GlobalSetting.zenMode 可能残留 true（官方 store 持久化）——若刚发生过
+        // 模式切换（applyModeChange），忽略该残留，避免"切模式就黑屏"。
+        const justSwitchedMode = Date.now() - lastModeSwitchAt < 1500;
+        if (cfg && cfg.zenMode === true && !justSwitchedMode) {
           enterZen();
         } else {
           zenActive = false;
@@ -437,12 +441,21 @@
     // modelConfigurationSet），在捕获阶段监听点击，命中"数字模式/多媒体模式"
     // 文本时更新 presetConfig.modeChange 并同步 LCD 显示模式。
     let lastModeChange = null;
+    let lastModeSwitchAt = 0; // 最近一次模式切换时间（modelConfigurationSet 判断用）
     function applyModeChange(mc) {
       if (mc === lastModeChange) return;
       lastModeChange = mc;
+      lastModeSwitchAt = Date.now();
       if (presetConfig) presetConfig.modeChange = mc;
       console.log('[DeepCool Linux] modeChange:', mc);
-      if (zenActive) return;
+      // 待机中切换模式：用户主动操作个性化设置 = 想看效果，自动退出待机
+      // （同步清标志 + 放行 hold），再应用新模式；官方禅状态开关显示由
+      // modelConfigurationSet 下次保存时同步。
+      if (zenActive) {
+        zenActive = false;
+        invoke('linux/hold-state', false).catch(() => {});
+        syncZenButton();
+      }
       if (mc === 1 && lastFrameDataUrl) {
         // 多媒体模式：显示当前媒体图/最近帧
         startImageLoop(lastFrameDataUrl);
