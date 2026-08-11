@@ -16,9 +16,11 @@ function makeMagic(name) {
     construct() { return p; },
     get(target, prop, receiver) {
       if (prop === 'then') {
+        // 同 controller_stub：resolve 值不能是 p（thenable 自我收养挂起），
+        // 同步 resolve(undefined)，与 Windows 桩行为一致。
         return function (onFulfilled) {
-          if (typeof onFulfilled === 'function') return Promise.resolve().then(() => onFulfilled(p));
-          return Promise.resolve(p);
+          if (typeof onFulfilled === 'function') onFulfilled();
+          return 0;
         };
       }
       if (prop === Symbol.toPrimitive) return () => 0;
@@ -48,7 +50,8 @@ function listDisks() {
       seen.add(name);
       try {
         // df -Pk: total KB, used KB, available KB, capacity, mountpoint
-        const line = execFileSync('df', ['-Pk', '--', mnt], { encoding: 'utf8' })
+        // timeout 防止挂死的挂载点（NFS/网络盘）冻结主进程
+        const line = execFileSync('df', ['-Pk', '--', mnt], { encoding: 'utf8', timeout: 2500 })
           .split('\n')[1].split(/\s+/);
         const total = parseInt(line[1], 10) * 1024;
         const used = parseInt(line[2], 10) * 1024;

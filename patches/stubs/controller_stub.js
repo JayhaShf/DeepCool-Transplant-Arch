@@ -14,10 +14,12 @@ function makeMagic() {
     construct(target, args) { return p; },
     get(target, prop, receiver) {
       if (prop === 'then') {
-        // thenable: await / .then() resolves to the stub itself
+        // thenable: await 桩值时立即完成。关键约束：resolve 的值绝不能是 p
+        // （p 是 thenable，promise 解析会再次收养 → 无限微任务链挂起），
+        // 因此 resolve(undefined)——与 Windows 桩返回 undefined 的行为一致。
         return function (onFulfilled) {
-          if (typeof onFulfilled === 'function') return Promise.resolve(p).then(onFulfilled);
-          return Promise.resolve(p);
+          if (typeof onFulfilled === 'function') onFulfilled();
+          return 0;
         };
       }
       if (prop === Symbol.toPrimitive) return () => 0;
