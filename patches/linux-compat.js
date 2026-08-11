@@ -140,8 +140,14 @@ const LOG_FILE = path.join(LOG_DIR, 'compat.log');
 const serialFallback = process.env.DEEPCOOL_SERIAL || 'LM-Series';
 
 try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch (_) {}
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
 function log(...args) {
   try {
+    // 轮转：超过 5MB 时改名留档，避免无限增长（daemon 不可用时每秒数行）
+    try {
+      const st = fs.statSync(LOG_FILE);
+      if (st.size > LOG_MAX_BYTES) fs.renameSync(LOG_FILE, `${LOG_FILE}.old`);
+    } catch (_) {}
     fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${args.map(formatLog).join(' ')}\n`);
   } catch (_) {}
 }
@@ -270,6 +276,24 @@ async function daemonStatus() {
   const now = Date.now();
   if (statusCache && now - statusAt < 700) return statusCache;
   if (statusPending) return statusPending;
+  // 先占位再发 monitor：两个并发调用（linux/status 与 app/get-sensors-data 同时
+  // 冷 cache）时，后到者复用同一 in-flight 请求，避免 monitor 重复发送与
+  // statusPending 被后赋值覆盖导致的请求风暴。
+  statusPending = daemonRequest({ action: 'status' })
+    .then((status) => {
+      // 仅当响应含 snapshot 时缓存（zen 等命令的响应没有 snapshot，
+      // 直接缓存会让 700ms 内传感器读数短暂归零）
+      if (status && status.snapshot) {
+        statusCache = status;
+        statusAt = Date.now();
+      }
+      return status;
+    })
+    .catch((error) => {
+      log('daemon status failed:', error);
+      return fallbackStatus(error);
+    })
+    .finally(() => { statusPending = null; });
   // 传感器采样：新 daemon 默认 auto 模式不采样，需要短暂处于 monitor 模式
   // 才会更新快照（monitor 模式渲染的是黑色空页，不产生任何可见内容）。
   // 注意：外部推帧（预设/图片/预览）激活时不能切 monitor，否则会覆盖画面。
@@ -278,17 +302,6 @@ async function daemonStatus() {
       log('ensure monitor failed:', error);
     });
   }
-  statusPending = daemonRequest({ action: 'status' })
-    .then((status) => {
-      statusCache = status;
-      statusAt = Date.now();
-      return status;
-    })
-    .catch((error) => {
-      log('daemon status failed:', error);
-      return fallbackStatus(error);
-    })
-    .finally(() => { statusPending = null; });
   return statusPending;
 }
 
@@ -331,9 +344,9 @@ function mapSensors(status) {
   const s = status && status.snapshot ? status.snapshot : fallbackStatus().snapshot;
   const netRows = Array.isArray(s.nets) ? s.nets : [];
   const diskRows = Array.isArray(s.disks) ? s.disks : [];
-  // Prefer physical interfaces; TUN/bridge/veth counters overlap with the
-  // underlying NIC and would otherwise be double-counted.
-  const physicalNets = netRows.filter((row) => !/^(Meta|lo|docker|bridge|veth|virbr|br-)/i.test(String(row.name || '')));
+  // Prefer physical interfaces; TUN/bridge/veth/WireGuard counters overlap
+  // with the underlying NIC and would otherwise be double-counted.
+  const physicalNets = netRows.filter((row) => !/^(Meta|lo|docker|bridge|veth|virbr|br-|tun|tap|wg|tailscale|ppp|wwan)/i.test(String(row.name || '')));
   const countedNets = physicalNets.length ? physicalNets : netRows;
   const rx = countedNets.reduce((sum, row) => sum + (Number(row.rx_bytes_s) || 0), 0);
   const tx = countedNets.reduce((sum, row) => sum + (Number(row.tx_bytes_s) || 0), 0);
@@ -734,8 +747,12 @@ originalHandle('linux/daemon-command', async (_event, request) => {
   delete payload.data;
   delete payload.color;
   const response = await daemonRequest(payload);
-  statusCache = response;
-  statusAt = Date.now();
+  // 仅当响应含 snapshot 时才写入缓存：zen 等命令的响应没有 snapshot，
+  // 直接缓存会让 700ms 内 mapSensors 读到空快照（传感器读数短暂归零）。
+  if (response && response.snapshot) {
+    statusCache = response;
+    statusAt = Date.now();
+  }
   return response;
 });
 originalHandle('linux/windows', async () => {
@@ -778,13 +795,63 @@ originalHandle('linux/hold-state', async (_event, active) => {
   log('external hold state', externalHoldActive);
   return { ok: true, active: externalHoldActive };
 });
+// 开机自启：与 scripts/install-autostart.sh 写入同一 XDG autostart 文件，
+// 软件内开关与命令行脚本互操作（同文件，状态互相可见）。
+const AUTOSTART_DIR = path.join(os.homedir(), '.config', 'autostart');
+const AUTOSTART_FILE = path.join(AUTOSTART_DIR, 'deepcool-official-linux.desktop');
+const AUTOSTART_BIN = path.join(os.homedir(), '.local', 'bin', 'deepcool-official-linux');
+function autostartDesktopContent() {
+  return `[Desktop Entry]
+Type=Application
+Name=DeepCool (Linux Port) Autostart
+Name[zh_CN]=DeepCool（Linux 移植版）开机自启
+Comment=Start DeepCool official UI in background (tray) at login
+Exec=${AUTOSTART_BIN} --hidden
+Icon=deepcool-official-linux
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3
+StartupNotify=false
+`;
+}
+function autostartBinReady() {
+  try {
+    fs.accessSync(AUTOSTART_BIN, fs.constants.X_OK);
+    return true;
+  } catch (_) { return false; }
+}
+originalHandle('linux/autostart-status', async () => ({
+  enabled: fs.existsSync(AUTOSTART_FILE),
+  path: AUTOSTART_FILE,
+  binExists: autostartBinReady(),
+}));
+originalHandle('linux/autostart-set', async (_event, request) => {
+  const want = Boolean(request && typeof request === 'object' ? request.enabled : request);
+  if (want) {
+    if (!autostartBinReady()) {
+      throw new Error('未找到启动器（或不可执行），请先运行: npm run install:user');
+    }
+    try {
+      fs.mkdirSync(AUTOSTART_DIR, { recursive: true });
+      fs.writeFileSync(AUTOSTART_FILE, autostartDesktopContent(), { mode: 0o644 });
+    } catch (error) {
+      throw new Error(`写入开机自启文件失败: ${error.message || error}`);
+    }
+    log('autostart enabled', AUTOSTART_FILE);
+  } else {
+    try { fs.unlinkSync(AUTOSTART_FILE); } catch (_) {}
+    log('autostart disabled', AUTOSTART_FILE);
+  }
+  return { ok: true, enabled: fs.existsSync(AUTOSTART_FILE), path: AUTOSTART_FILE };
+});
 originalHandle('linux/push-image', async (_event, dataUrl) => {
   log('push-image called');
   const match = String(dataUrl || '').match(/^data:image\/png;base64,(.+)$/);
   if (!match) throw new Error('需要 PNG data URL');
   const png = Buffer.from(match[1], 'base64');
   if (png.length === 0) throw new Error('图片为空');
-  if (png.length > 16 * 1024 * 1024) throw new Error('图片过大');
+  // 上限与 daemonRequest 的 20MB 请求体一致：base64 后 ≈ ×4/3，14MB PNG 安全
+  if (png.length > 14 * 1024 * 1024) throw new Error('图片过大（最大 14MB）');
   return daemonRequest({ action: 'image', data: png.toString('base64') }, 8000);
 });
 async function captureImageDataUrl(event, rect) {
@@ -794,7 +861,11 @@ async function captureImageDataUrl(event, rect) {
     width: Math.min(4096, Math.max(1, Math.round(Number(rect?.width) || 320))),
     height: Math.min(4096, Math.max(1, Math.round(Number(rect?.height) || 240))),
   };
-  const image = await event.sender.capturePage(bounds);
+  // capturePage 无超时：加 4s 兜底，防止并发截图挂起主进程 IPC
+  const image = await Promise.race([
+    event.sender.capturePage(bounds),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('capturePage timeout')), 4000)),
+  ]);
   if (image.isEmpty()) throw new Error('preview capture is empty');
   const png = image.resize({ width: 320, height: 240, quality: 'best' }).toPNG();
   return `data:image/png;base64,${png.toString('base64')}`;
