@@ -18,6 +18,15 @@ if [ -f "$APP_DIR/resources/app.asar" ] && [ -d "$APP_DIR/resources/app.asar.ext
 fi
 
 if [ "${FORCE_EXTRACT:-0}" = 1 ]; then
+  # 路径安全：仅允许删除仓库 work/ 下的解包目录（NSIS_DIR/APP_DIR 可被环境变量覆盖，
+  # 防止误设成 $HOME 等目录时 FORCE_EXTRACT 递归删除）
+  case "$NSIS_DIR:$APP_DIR" in
+    "$ROOT/work/"*:"$ROOT/work/"*) ;;
+    *)
+      echo "FORCE_EXTRACT 拒绝：NSIS_DIR/APP_DIR 必须在 \$ROOT/work 下（当前 $NSIS_DIR / $APP_DIR）" >&2
+      exit 1
+      ;;
+  esac
   rm -rf "$NSIS_DIR" "$APP_DIR"
 fi
 mkdir -p "$NSIS_DIR" "$APP_DIR"
