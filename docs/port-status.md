@@ -1,8 +1,8 @@
 # DeepCool 1.2.12 Linux 移植状态
 
-> 本文是逐次修复的历史 changelog；当前协议/行为以 `README.md` 与
-> `daemon/README.md` 为准（例如：`linux/daemon-command` 白名单现仅 `status`/`zen`，
-> zen 为黑帧待机，推帧周期为 1 秒）。
+> 本文是逐次修复的历史 changelog；**当前协议/行为以 `README.md` 与
+> `daemon/README.md` 及代码为准**（数字推帧 1s、可选禅降频、强制禅 ZEN 静帧、
+> GIF/视频抽帧+switchTime、player/media 持久化、USB 单写者与 reset 限流等）。
 
 日期：2026-08-09
 

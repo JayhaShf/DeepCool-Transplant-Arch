@@ -400,21 +400,64 @@
       }
     }
 
-    // 上传图片/编辑图片后：推一次，由 daemon 保活重发
-    // 官方强制禅时禁止对显示屏操作 → 忽略上传上屏
-    function startImageLoop(dataUrl) {
+    // 多媒体静图：推一次，daemon 保活。
+    // GIF/视频：多帧按 playerConfig.switchTime（官方默认 3000ms）轮播。
+    // 官方强制禅时禁止对显示屏操作 → 忽略上传上屏。
+    let mediaFrames = null;
+    let mediaFrameIndex = 0;
+    let mediaIntervalMs = 3000;
+
+    function startImageLoop(dataUrl, options = {}) {
       if (zenActive || isMandatoryZen(presetConfig)) {
         console.log('[DeepCool Linux] skip image loop (mandatory zen / standby)');
         return;
       }
+      const frames = Array.isArray(options.frames) && options.frames.length
+        ? options.frames.filter(Boolean)
+        : (dataUrl ? [dataUrl] : []);
+      if (!frames.length) return;
+
       stopLoop();
       zenActive = false;
       active = true;
       currentMode = 'image';
       lastPushedDataUrl = null;
+      mediaFrames = frames;
+      mediaFrameIndex = 0;
+      mediaIntervalMs = Math.max(200, Number(options.intervalMs) || 3000);
+      lastFrameDataUrl = frames[0];
       invoke('linux/hold-state', true).catch(() => {});
-      pushDataUrl(dataUrl, 'image', true).catch((error) => {
+
+      const pushCurrent = (force) => {
+        if (!mediaFrames || !mediaFrames.length) return Promise.resolve(false);
+        const url = mediaFrames[mediaFrameIndex % mediaFrames.length];
+        return pushDataUrl(url, 'image', force);
+      };
+
+      pushCurrent(true).catch((error) => {
         console.error('[DeepCool Linux] image push failed:', error);
+      });
+
+      if (frames.length > 1) {
+        // 多帧轮播：对齐官方 switchTime；单帧不设 interval（daemon 保活即可）
+        timer = setInterval(() => {
+          if (!active || currentMode !== 'image' || zenActive || !mediaFrames) return;
+          mediaFrameIndex = (mediaFrameIndex + 1) % mediaFrames.length;
+          // 顺序/循环：playingOrder 为 reverse 时反向
+          pushCurrent(true).catch(() => {});
+        }, mediaIntervalMs);
+      }
+    }
+
+    function startMediaFromUploadResult(data) {
+      if (!data) return;
+      const frames = Array.isArray(data.frames) && data.frames.length
+        ? data.frames
+        : (data.frameDataUrl ? [data.frameDataUrl] : []);
+      if (!frames.length) return;
+      startImageLoop(frames[0], {
+        frames,
+        intervalMs: data.intervalMs || mediaIntervalMs || 3000,
       });
     }
 
@@ -560,15 +603,27 @@
         handleModelConfigurationSet(cfg);
         invoke('linux/preset-save', cfg).catch(() => {});
       }
-      // 上传/编辑图片成功：显示该图片（软件预览与 LCD 同一张）
-      // 不改 modeChange（官方多媒体模式仍由 el-select 决定）；数字模式下也可预览上传图，
-      // 再切回数字模式时 handleModelConfigurationSet(modeChanged/applyDisplayMode) 会恢复 preset。
-      if ((channel === 'l122/uploadSelectedMedia' || channel === 'l122/modifyMedia') && result && result.code === 0 && result.data && result.data.frameDataUrl) {
-        startImageLoop(result.data.frameDataUrl);
+      // 上传/编辑图片/视频成功：静图一次推送；GIF/视频多帧按 switchTime 轮播
+      if ((channel === 'l122/uploadSelectedMedia' || channel === 'l122/modifyMedia'
+        || channel === 'l122/uploadSelectedVideo' || channel === 'l122/modifyVideo')
+        && result && result.code === 0 && result.data) {
+        startMediaFromUploadResult(result.data);
       }
-      // 播放配置：官方 watch(ImageConfig) → setPlayerConfiguration；仅持久化，不改推帧模型
+      // 播放配置：官方 watch(ImageConfig) → setPlayerConfiguration
+      // 若正在多帧轮播，热更新间隔（对齐 switchTime）
       if (channel === 'l122/playerConfigurationSet' && args[0] && typeof args[0] === 'object') {
+        const sw = Number(args[0].switchTime);
+        if (Number.isFinite(sw) && sw > 0) mediaIntervalMs = Math.max(200, sw);
         console.log('[DeepCool Linux] playerConfig', args[0]);
+        if (active && currentMode === 'image' && mediaFrames && mediaFrames.length > 1 && timer) {
+          clearInterval(timer);
+          timer = setInterval(() => {
+            if (!active || currentMode !== 'image' || zenActive || !mediaFrames) return;
+            mediaFrameIndex = (mediaFrameIndex + 1) % mediaFrames.length;
+            const url = mediaFrames[mediaFrameIndex];
+            pushDataUrl(url, 'image', true).catch(() => {});
+          }, mediaIntervalMs);
+        }
       }
       return result;
     };
@@ -599,20 +654,41 @@
           };
           if (saved.brightnessControl !== undefined) lastBrightness = saved.brightnessControl;
           optionalZenActive = isOptionalZen(saved);
-          // 恢复最近媒体帧（若有）
+          // 恢复最近媒体帧（含 GIF/视频多帧）；并读取 switchTime
+          let restoredFrames = null;
+          let restoredInterval = 3000;
+          try {
+            const pc = await invoke('l122/playerConfigurationSearch');
+            if (pc && pc.data && Number(pc.data.switchTime) > 0) {
+              restoredInterval = Math.max(200, Number(pc.data.switchTime));
+              mediaIntervalMs = restoredInterval;
+            }
+          } catch (_) {}
           try {
             const all = await invoke('l122/getAllMedia');
             const lists = []
               .concat((all && all.data && all.data.imageList) || [])
-              .concat((all && all.data && all.data.gifList) || []);
-            const cur = lists.find((m) => m && m.isCurrent && m.frameDataUrl)
-              || lists.slice().reverse().find((m) => m && m.frameDataUrl);
-            if (cur && cur.frameDataUrl) lastFrameDataUrl = cur.frameDataUrl;
+              .concat((all && all.data && all.data.gifList) || [])
+              .concat((all && all.data && all.data.videoList) || []);
+            const cur = lists.find((m) => m && m.isCurrent && (m.frameDataUrl || (m.frames && m.frames.length)))
+              || lists.slice().reverse().find((m) => m && (m.frameDataUrl || (m.frames && m.frames.length)));
+            if (cur) {
+              restoredFrames = Array.isArray(cur.frames) && cur.frames.length
+                ? cur.frames
+                : (cur.frameDataUrl ? [cur.frameDataUrl] : null);
+              if (restoredFrames && restoredFrames.length) {
+                lastFrameDataUrl = restoredFrames[0];
+              }
+            }
           } catch (_) {}
+          // 先 applyDisplayMode（处理强制禅/数字模式）；多媒体且有帧时再覆盖为轮播
           applyDisplayMode(saved, 'restore');
+          if (!zenActive && Number(saved.modeChange) === 1 && restoredFrames && restoredFrames.length) {
+            startImageLoop(restoredFrames[0], { frames: restoredFrames, intervalMs: restoredInterval });
+          }
           console.log('[DeepCool Linux] restored preset:', saved.digitalData,
             'modeChange:', saved.modeChange, 'zen:', saved.zenMode, 'mandatory:', saved.mandatoryZenMode,
-            'hasMediaFrame:', !!lastFrameDataUrl);
+            'frames:', restoredFrames ? restoredFrames.length : 0);
         }
       } catch (error) {
         console.error('[DeepCool Linux] restore preset failed:', error);

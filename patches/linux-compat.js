@@ -8,7 +8,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const net = require('net');
-const { execFileSync } = require('child_process');
+const { execFileSync, execFile } = require('child_process');
+const { promisify } = require('util');
+const execFileAsync = promisify(execFile);
 const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } = require('electron');
 
 // 1×1 黑色 PNG（统一渲染后 main 进程不再生成任何画面）
@@ -390,6 +392,103 @@ function processImageToFrame(data) {
   const resized = img.resize({ width: 320, height: 240, quality: 'best' });
   if (resized.isEmpty()) throw new Error('图片处理失败');
   return `data:image/png;base64,${resized.toPNG().toString('base64')}`;
+}
+
+function findFfmpeg() {
+  for (const bin of ['ffmpeg', '/usr/bin/ffmpeg', '/usr/sbin/ffmpeg']) {
+    try {
+      execFileSync(bin, ['-version'], { timeout: 2000, stdio: 'ignore' });
+      return bin;
+    } catch (_) {}
+  }
+  return null;
+}
+
+function pngFileToDataUrl(filePath) {
+  const image = nativeImage.createFromPath(filePath);
+  if (image.isEmpty()) return null;
+  const resized = image.resize({ width: 320, height: 240, quality: 'best' });
+  if (resized.isEmpty()) return null;
+  return `data:image/png;base64,${resized.toPNG().toString('base64')}`;
+}
+
+// GIF/视频 → 多帧 PNG dataURL。官方 ImageConfig.switchTime 控制切换间隔（默认 3s）。
+// 限制帧数与时长，避免 userData/推帧过重。
+async function extractMediaFrames(filePath, { kind = 'gif', maxFrames = 24, maxSeconds = 8 } = {}) {
+  const ffmpeg = findFfmpeg();
+  if (!ffmpeg) throw new Error('未找到 ffmpeg，无法解析 GIF/视频（pacman -S ffmpeg）');
+  if (!filePath || !fs.existsSync(filePath)) throw new Error(`文件不存在: ${filePath}`);
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'deepcool-media-'));
+  const pattern = path.join(tmpRoot, 'frame_%03d.png');
+  try {
+    // 统一缩放到 320x240，控制输出帧率：GIF 用源帧率但 cap；视频约 4fps 抽帧
+    const vf = kind === 'video'
+      ? 'fps=4,scale=320:240:force_original_aspect_ratio=decrease,pad=320:240:(ow-iw)/2:(oh-ih)/2'
+      : 'scale=320:240:force_original_aspect_ratio=decrease,pad=320:240:(ow-iw)/2:(oh-ih)/2';
+    const args = ['-y', '-i', filePath, '-t', String(maxSeconds), '-vf', vf, '-frames:v', String(maxFrames), pattern];
+    await execFileAsync(ffmpeg, args, { timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
+    const files = fs.readdirSync(tmpRoot)
+      .filter((n) => /^frame_\d+\.png$/.test(n))
+      .sort()
+      .map((n) => path.join(tmpRoot, n));
+    if (!files.length) throw new Error('未能从媒体中抽出任何帧');
+    const frames = [];
+    for (const f of files) {
+      const url = pngFileToDataUrl(f);
+      if (url) frames.push(url);
+    }
+    if (!frames.length) throw new Error('抽出的帧无法解码为 PNG');
+    return frames;
+  } finally {
+    try {
+      for (const n of fs.readdirSync(tmpRoot)) {
+        try { fs.unlinkSync(path.join(tmpRoot, n)); } catch (_) {}
+      }
+      fs.rmdirSync(tmpRoot);
+    } catch (_) {}
+  }
+}
+
+async function processMediaUpload(media, serialNumber, { kind = 'image', id } = {}) {
+  const pathValue = media?.path || media?.originalPath || '';
+  const lower = String(pathValue).toLowerCase();
+  const isGif = kind === 'gif' || lower.endsWith('.gif') || String(media?.mediaType || '').toLowerCase() === 'gif';
+  const isVideo = kind === 'video'
+    || /\.(mp4|webm|avi|mkv|mov|m4v)$/i.test(pathValue)
+    || String(media?.mediaType || '').toLowerCase() === 'video';
+
+  let frames = [];
+  let frameDataUrl = null;
+  if (isGif || isVideo) {
+    frames = await extractMediaFrames(pathValue, {
+      kind: isVideo ? 'video' : 'gif',
+      maxFrames: isVideo ? 20 : 24,
+      maxSeconds: isVideo ? 6 : 8,
+    });
+    frameDataUrl = frames[0];
+  } else {
+    frameDataUrl = processImageToFrame(media || {});
+    frames = [frameDataUrl];
+  }
+
+  const payload = { ...(media || {}), id: id || media?.id, mediaType: isVideo ? 'video' : (isGif ? 'gif' : 'image') };
+  const { item } = mediaFromUpload(payload, serialNumber, frameDataUrl);
+  // 多帧挂在 item 上并持久化（数量已受限）
+  item.frames = frames;
+  item.frameCount = frames.length;
+  // 写回 store 中的同一项
+  for (const list of [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList]) {
+    const idx = list.findIndex((m) => String(m.id) === String(item.id));
+    if (idx >= 0) list[idx] = item;
+  }
+  persistMediaStore();
+  return {
+    frameDataUrl,
+    frames,
+    media: item,
+    intervalMs: Math.max(200, Number(playerConfig.switchTime) || 3000),
+  };
 }
 
 let statusCache = null;
@@ -777,12 +876,12 @@ const overrides = {
     mode: 'replace',
     fn: async (_event, media, serialNumber) => {
       try {
-        const frameDataUrl = processImageToFrame(media || {});
-        const { item } = mediaFromUpload(media, serialNumber, frameDataUrl);
-        log('upload image ok', item.elementPath, frameDataUrl.length);
-        return ok({ frameDataUrl, media: item });
+        ensureMediaPersistLoaded();
+        const result = await processMediaUpload(media || {}, serialNumber, { kind: 'image' });
+        log('upload media ok', result.media.elementPath, 'frames', result.frames.length);
+        return ok(result);
       } catch (error) {
-        log('upload image failed:', error);
+        log('upload media failed:', error);
         return { code: 1, message: error.message || String(error), data: null };
       }
     },
@@ -791,25 +890,54 @@ const overrides = {
     mode: 'replace',
     fn: async (_event, media, id, serialNumber) => {
       try {
-        const frameDataUrl = processImageToFrame(media || {});
-        // 保留原 id 若传入
-        const payload = { ...(media || {}), id: id || media?.id };
-        const { item } = mediaFromUpload(payload, serialNumber, frameDataUrl);
-        log('modify image ok', item.elementPath, frameDataUrl.length);
-        return ok({ frameDataUrl, media: item });
+        ensureMediaPersistLoaded();
+        const result = await processMediaUpload(media || {}, serialNumber, {
+          kind: 'image',
+          id: id || media?.id,
+        });
+        log('modify media ok', result.media.elementPath, 'frames', result.frames.length);
+        return ok(result);
       } catch (error) {
-        log('modify image failed:', error);
+        log('modify media failed:', error);
         return { code: 1, message: error.message || String(error), data: null };
       }
     },
   },
   'l122/uploadSelectedVideo': {
     mode: 'replace',
-    fn: async () => ({ code: 1, message: 'Linux 移植版暂不支持视频上传（可用图片/GIF）', data: null }),
+    fn: async (_event, media, serialNumber) => {
+      try {
+        ensureMediaPersistLoaded();
+        const result = await processMediaUpload(media || {}, serialNumber, { kind: 'video' });
+        log('upload video ok', result.media.elementPath, 'frames', result.frames.length);
+        // 官方视频链路期望结构可能不同；提供 frameDataUrl/frames 供 overlay 轮播
+        return ok(result);
+      } catch (error) {
+        log('upload video failed:', error);
+        return {
+          code: 1,
+          message: error.message || String(error) || '视频处理失败（需 ffmpeg）',
+          data: null,
+        };
+      }
+    },
   },
   'l122/modifyVideo': {
     mode: 'replace',
-    fn: async () => ({ code: 1, message: 'Linux 移植版暂不支持视频编辑', data: null }),
+    fn: async (_event, media, id, serialNumber) => {
+      try {
+        ensureMediaPersistLoaded();
+        const result = await processMediaUpload(media || {}, serialNumber, {
+          kind: 'video',
+          id: id || media?.id,
+        });
+        log('modify video ok', result.media.elementPath, 'frames', result.frames.length);
+        return ok(result);
+      } catch (error) {
+        log('modify video failed:', error);
+        return { code: 1, message: error.message || String(error), data: null };
+      }
+    },
   },
   'l122/getAllMedia': {
     mode: 'replace',

@@ -236,17 +236,19 @@ Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 + ACL），JSON 请求：
 | `image` | `data`: PNG base64 | 320×240 RGB565 推帧，持续重发 |
 | `brightness` | `direction`: up/down | 硬件亮度步进 |
 
-## 图片上传（Linux 实现）
+## 图片 / GIF / 视频上传（Linux 实现）
 
 官方上传链路依赖 Windows DLL（文件对话框/opencv/L122 控制器），Linux 桩会
 导致 UI 一直停在"处理中"。移植层已实现 Linux 上传：
 
-- `media/selectImg` / `selectGif` / `selectVideo`：改用 Electron 原生文件对话框；
-- `l122/uploadSelectedMedia` / `l122/modifyMedia`：用 Electron `nativeImage`
-  读取图片、按官方裁剪参数裁剪并缩放 320×240，返回 `frameDataUrl`；
-- overlay 收到后进入 `image` 模式：LCD 持续显示该图片，软件预览与 LCD 同一张；
-- `l122/getAllMedia` / `deleteOneMedia`：维护内存媒体列表；
-- 视频上传/编辑：明确提示暂不支持（不再卡死）。
+- `media/selectImg` / `selectGif` / `selectVideo`：Electron 原生文件对话框；
+- 静图：`nativeImage` 裁切缩放 320×240 → `frameDataUrl`；
+- **GIF / 视频**：本机 `ffmpeg` 抽帧（时长与帧数有上限）→ `frames[]`；
+  overlay 按官方 `ImageConfig.switchTime`（默认 3000ms）轮播推 LCD；
+- `l122/playerConfigurationSearch/Set`：读写 `playingOrder/playingAnimation/switchTime`，
+  持久化到 `userData/player-config.json`；
+- `l122/getAllMedia` / 上传结果：持久化到 `userData/media-store.json`（含帧，列表有上限）；
+- 复杂视频时间线/opencv 精修仍非完整官方实现，但不再卡死，LCD 可播放抽帧序列。
 
 ## 官方 LCD 布局（已移植）
 
@@ -267,45 +269,43 @@ Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 + ACL），JSON 请求：
   而是直接返回最近推送到 LCD 的同一张图（`lastFrameDataUrl`）。
 - LCD 与软件预览显示完全一致。
 
-## 推帧周期
+## 推帧周期（对齐官方 + 防固件卡死）
 
-- 预设/图片/预览推帧均为 **1 秒**刷新（`setInterval` 1000ms）；
-- 带 in-flight 保护（上一帧未完成跳过本 tick），daemon 慢时不并发堆积；
-- 亮度遮罩、lastFrameDataUrl、模式复查在统一推帧入口处理。
+- **数字模式**：overlay **1s** 重绘推帧（对齐官方 `L122Canvas` `setInterval(1e3)`）；
+- **可选禅**：约 **5s** 降频；CPU≥85 加深遮罩（对齐官方「降低同步频率」）；
+- **强制禅**：推 **ZEN MODE** 静帧并停内容流（对齐 `mandatoryZenMode` 禁操作语义）；
+- **静图 / 预览**：只推一次，daemon **~3s** 保活重发；
+- **GIF/视频抽帧**：按 `switchTime`（默认 3s）轮播；
+- USB **单写者**（仅 daemon `frame_loop`）+ 推图串行 + reset 冷却限流。
 
 ## 重启软件自动恢复 LCD 显示
 
-- 保存个性化设置时写入 `preset.json`（userData），重启后自动读取并恢复
-  该预设推帧（含亮度、数字/多媒体模式）。
-- 验证：设置 GPU监控（亮度60）→ 重启 → 自动恢复 preset 模式、daemon static、
-  推帧持续。
+- `preset.json`：亮度、数字/多媒体、禅相关、digitalData；
+- `player-config.json` / `media-store.json`：播放参数与媒体帧；
+- 重启后恢复数字布局或多媒体最近图/多帧轮播。
+
+## 禅状态（对齐官方分级）
+
+- **强制禅**（zen + mandatory）：LCD 显示 ZEN 静帧，禁止上传/预览抢帧；
+- **可选禅**（仅 zen）：仍显示内容，降频；高负载加深遮罩；
+- **不用**硬件 zen toggle（避免关屏后无法亮起）。
 
 ## 修复记录（本仓库）
 
-详见 `docs/port-status.md`。近期的关键修复：
+详见 `docs/port-status.md`（历史 changelog；**以本 README 与代码为准**）。近期关键点：
 
-- **GPU 显存显示**：nvidia-smi 返回 MiB 而消费方按字节换算 → daemon 侧
-  ×1048576 统一转字节，`memSize/memUsage` 恢复真实值（1.5GB/12GB）。
-- **stubs thenable 挂起**：`Promise.resolve(p)` 对 thenable 自我收养导致
-  `await` 永不返回 → 改为同步 resolve(undefined)。
-- **推帧并发堆积**：1 秒推帧加 in-flight 保护 + capture 4s 超时。
-- **多媒体模式**：捕获官方下拉点击，`modeChange` 实时切换 LCD 模式，
-  重启按保存的模式恢复。
-- **禅状态开关**：官方开关桥接 `linux/daemon-command zen`（黑帧待机，
-  恢复推帧即点亮，不依赖硬件 zen toggle）。
-- **开机自启**：官方设置页开关写/删 XDG autostart 文件（`app/set-setting`
-  拦截 + 状态校准）。
-- **CPU 频率单位**：daemon 上报 GHz，渲染层 ×1000 转 MHz 显示。
+- 官方 `modelConfigurationSet` 路径互切数字/多媒体；禅分级与亮度软遮罩；
+- playerConfiguration / 媒体持久化；GIF·视频 ffmpeg 抽帧轮播；
+- daemon USB 单写者、分包、reset 限流；socket 0660+用户 ACL；CDP 默认关。
 
 ## 当前限制
 
 - 这是互操作性移植，不是官方 Linux 版本。
-- Windows 控制器 `.node` DLL 没有被重新编译；官方 UI 中部分高级媒体、固件更新、
-  Windows HWiNFO、屏幕捕获和风扇曲线功能仍由桩处理或禁用。
-- 官方 UI 的普通配置项会保存在自己的用户数据目录，但只有底部 Linux 桥明确连接
-  当前 Python daemon；不要用此移植版刷固件。
-- Electron 23 已停止上游维护，仅建议把它用于此离线本机界面，不要加载不可信网页。
-- 安装包和官方素材版权属于 DeepCool；本目录只做本机分析与互操作，不应重新分发官方 payload。
+- 视频为 **抽帧轮播**，非实时解码/完整时间线编辑；opencv 精修裁切链未完整复刻。
+- Windows 控制器 `.node` 未重编译；固件升级禁用；HWiNFO 等 Windows 专有能力为桩。
+- LCD 控制器若进入「bulk 写成功但不刷新」固件死锁，软件 reset 不一定够，可能仍需断电。
+- Electron 23 已停更，仅建议离线本机使用；勿加载不可信网页。
+- 安装包与官方素材版权属 DeepCool；勿再分发官方 payload。
 
 ## 目录
 
