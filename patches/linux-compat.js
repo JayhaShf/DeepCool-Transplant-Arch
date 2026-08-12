@@ -227,34 +227,149 @@ function daemonRequest(request, timeoutMs = 3000) {
   });
 }
 
-// ---- 上传媒体（Linux 实现）----
-// 官方上传链路依赖 Windows DLL（文件对话框/opencv/L122 控制器），Linux 桩无法完成，
-// 这里用 Electron 原生能力实现：选择图片 → 裁剪/缩放 320×240 → 返回 frameDataUrl，
-// 由 renderer overlay 负责推屏（保持渲染职责唯一）。
+// ---- 上传媒体 / 播放配置（Linux 实现）----
+// 官方：ImageConfig via l122/playerConfiguration*；媒体库 via getAllMedia 等。
+// 默认结构对齐 index-8dc9d6df.js store：playingOrder/playingAnimation/switchTime。
+const DEFAULT_IMAGE_CONFIG = {
+  playingOrder: 'loop',
+  playingAnimation: 'panning',
+  switchTime: 3000,
+};
+let playerConfig = { ...DEFAULT_IMAGE_CONFIG };
 const mediaStore = { imageList: [], gifList: [], videoList: [] };
 let mediaId = 1;
+let mediaPersistReady = false;
 
-function mediaFromUpload(data, serialNumber) {
+function userDataFile(name) {
+  try { return path.join(app.getPath('userData'), name); } catch (_) { return null; }
+}
+
+function loadJsonFile(name, fallback) {
+  try {
+    const file = userDataFile(name);
+    if (!file || !fs.existsSync(file)) return fallback;
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    log('loadJson failed', name, error);
+    return fallback;
+  }
+}
+
+function saveJsonFile(name, value) {
+  try {
+    const file = userDataFile(name);
+    if (!file) return false;
+    fs.writeFileSync(file, JSON.stringify(value), 'utf8');
+    return true;
+  } catch (error) {
+    log('saveJson failed', name, error);
+    return false;
+  }
+}
+
+function ensureMediaPersistLoaded() {
+  if (mediaPersistReady) return;
+  mediaPersistReady = true;
+  const savedPlayer = loadJsonFile('player-config.json', null);
+  if (savedPlayer && typeof savedPlayer === 'object') {
+    playerConfig = {
+      playingOrder: savedPlayer.playingOrder || DEFAULT_IMAGE_CONFIG.playingOrder,
+      playingAnimation: savedPlayer.playingAnimation || DEFAULT_IMAGE_CONFIG.playingAnimation,
+      switchTime: Number(savedPlayer.switchTime) || DEFAULT_IMAGE_CONFIG.switchTime,
+    };
+  }
+  const savedMedia = loadJsonFile('media-store.json', null);
+  if (savedMedia && typeof savedMedia === 'object') {
+    mediaStore.imageList = Array.isArray(savedMedia.imageList) ? savedMedia.imageList : [];
+    mediaStore.gifList = Array.isArray(savedMedia.gifList) ? savedMedia.gifList : [];
+    mediaStore.videoList = Array.isArray(savedMedia.videoList) ? savedMedia.videoList : [];
+    // 恢复 mediaId 单调递增，避免 id 冲突
+    let maxN = 0;
+    for (const list of [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList]) {
+      for (const entry of list) {
+        const m = String(entry.id || '').match(/linux-(\d+)/);
+        if (m) maxN = Math.max(maxN, Number(m[1]) || 0);
+      }
+    }
+    mediaId = maxN + 1;
+  }
+}
+
+function persistMediaStore() {
+  ensureMediaPersistLoaded();
+  // frameDataUrl 可能较大：仍持久化以便重启后多媒体模式可恢复最近图
+  saveJsonFile('media-store.json', mediaStore);
+}
+
+function persistPlayerConfig() {
+  ensureMediaPersistLoaded();
+  saveJsonFile('player-config.json', playerConfig);
+}
+
+function mediaFromUpload(data, serialNumber, frameDataUrl) {
+  ensureMediaPersistLoaded();
   const type = String(data?.mediaType || 'image').toLowerCase();
   const pathValue = data?.path || data?.originalPath || '';
-  const id = String(data?.id || `linux-${mediaId++}`);
   const isGif = type === 'gif' || /\.gif$/i.test(pathValue);
   const bucket = isGif ? 'gifList' : (type === 'video' ? 'videoList' : 'imageList');
-  const item = {
-    id,
-    mediaType: isGif ? 'gif' : 'image',
-    elementPath: pathValue,
-    firstFramePath: pathValue,
-    name: pathValue.split('/').pop() || 'image',
-    isCurrent: true,
-    serialNumber,
-  };
+  const id = String(data?.id || `linux-${mediaId++}`);
   // 同一时间只保留一个 isCurrent
   for (const list of [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList]) {
     for (const entry of list) entry.isCurrent = false;
   }
-  mediaStore[bucket].push(item);
+  // modify：同 id 则更新
+  let item = null;
+  for (const list of [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList]) {
+    const idx = list.findIndex((m) => String(m.id) === id);
+    if (idx >= 0) {
+      item = {
+        ...list[idx],
+        mediaType: isGif ? 'gif' : (list[idx].mediaType || 'image'),
+        elementPath: pathValue || list[idx].elementPath,
+        firstFramePath: pathValue || list[idx].firstFramePath,
+        name: (pathValue && pathValue.split('/').pop()) || list[idx].name || 'image',
+        isCurrent: true,
+        serialNumber: serialNumber || list[idx].serialNumber,
+        frameDataUrl: frameDataUrl || list[idx].frameDataUrl || null,
+      };
+      // 类型桶变化时迁移
+      if (list !== mediaStore[bucket]) {
+        list.splice(idx, 1);
+        mediaStore[bucket].push(item);
+      } else {
+        list[idx] = item;
+      }
+      break;
+    }
+  }
+  if (!item) {
+    item = {
+      id,
+      mediaType: isGif ? 'gif' : 'image',
+      elementPath: pathValue,
+      firstFramePath: pathValue,
+      name: pathValue.split('/').pop() || 'image',
+      isCurrent: true,
+      serialNumber,
+      frameDataUrl: frameDataUrl || null,
+    };
+    mediaStore[bucket].push(item);
+  }
+  // 限制列表长度，避免 frameDataUrl 把 userData 撑爆
+  if (mediaStore[bucket].length > 30) {
+    mediaStore[bucket] = mediaStore[bucket].slice(-30);
+  }
+  persistMediaStore();
   return { item, bucket };
+}
+
+function currentMediaList() {
+  ensureMediaPersistLoaded();
+  for (const list of [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList]) {
+    const cur = list.find((m) => m && m.isCurrent);
+    if (cur) return [cur];
+  }
+  return [];
 }
 
 function processImageToFrame(data) {
@@ -663,7 +778,7 @@ const overrides = {
     fn: async (_event, media, serialNumber) => {
       try {
         const frameDataUrl = processImageToFrame(media || {});
-        const { item } = mediaFromUpload(media, serialNumber);
+        const { item } = mediaFromUpload(media, serialNumber, frameDataUrl);
         log('upload image ok', item.elementPath, frameDataUrl.length);
         return ok({ frameDataUrl, media: item });
       } catch (error) {
@@ -677,7 +792,9 @@ const overrides = {
     fn: async (_event, media, id, serialNumber) => {
       try {
         const frameDataUrl = processImageToFrame(media || {});
-        const { item } = mediaFromUpload(media, serialNumber);
+        // 保留原 id 若传入
+        const payload = { ...(media || {}), id: id || media?.id };
+        const { item } = mediaFromUpload(payload, serialNumber, frameDataUrl);
         log('modify image ok', item.elementPath, frameDataUrl.length);
         return ok({ frameDataUrl, media: item });
       } catch (error) {
@@ -696,24 +813,67 @@ const overrides = {
   },
   'l122/getAllMedia': {
     mode: 'replace',
-    fn: async () => ok(mediaStore),
+    fn: async () => {
+      ensureMediaPersistLoaded();
+      return ok(mediaStore);
+    },
   },
   'l122/deleteOneMedia': {
     mode: 'replace',
     fn: async (_event, id) => {
+      ensureMediaPersistLoaded();
       for (const key of ['imageList', 'gifList', 'videoList']) {
         mediaStore[key] = mediaStore[key].filter((m) => String(m.id) !== String(id));
       }
+      persistMediaStore();
       return ok(true);
     },
   },
+  // 官方 getCurrentMedia → getElementDataCurrent；store 赋给 currentData
   'l122/getElementDataCurrent': {
     mode: 'replace',
-    fn: async () => ok([]),
+    fn: async () => {
+      ensureMediaPersistLoaded();
+      return ok(currentMediaList());
+    },
   },
   'l122/setElementDataCurrent': {
     mode: 'replace',
-    fn: async () => ok(true),
+    fn: async (_event, serialNumber, element) => {
+      ensureMediaPersistLoaded();
+      const id = element && (element.id != null ? String(element.id) : null);
+      for (const list of [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList]) {
+        for (const entry of list) {
+          entry.isCurrent = id != null && String(entry.id) === id;
+          if (entry.isCurrent && serialNumber) entry.serialNumber = serialNumber;
+        }
+      }
+      persistMediaStore();
+      return ok(true);
+    },
+  },
+  // 官方 ImageConfig：playingOrder / playingAnimation / switchTime
+  'l122/playerConfigurationSearch': {
+    mode: 'replace',
+    fn: async () => {
+      ensureMediaPersistLoaded();
+      return ok({ ...playerConfig });
+    },
+  },
+  'l122/playerConfigurationSet': {
+    mode: 'replace',
+    fn: async (_event, value) => {
+      ensureMediaPersistLoaded();
+      const v = value && typeof value === 'object' ? value : {};
+      playerConfig = {
+        playingOrder: v.playingOrder || playerConfig.playingOrder || DEFAULT_IMAGE_CONFIG.playingOrder,
+        playingAnimation: v.playingAnimation || playerConfig.playingAnimation || DEFAULT_IMAGE_CONFIG.playingAnimation,
+        switchTime: Number(v.switchTime) || playerConfig.switchTime || DEFAULT_IMAGE_CONFIG.switchTime,
+      };
+      persistPlayerConfig();
+      log('playerConfigurationSet', playerConfig);
+      return ok({ ...playerConfig });
+    },
   },
   'sys/restart-system': {
     mode: 'replace',

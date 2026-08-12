@@ -566,6 +566,10 @@
       if ((channel === 'l122/uploadSelectedMedia' || channel === 'l122/modifyMedia') && result && result.code === 0 && result.data && result.data.frameDataUrl) {
         startImageLoop(result.data.frameDataUrl);
       }
+      // 播放配置：官方 watch(ImageConfig) → setPlayerConfiguration；仅持久化，不改推帧模型
+      if (channel === 'l122/playerConfigurationSet' && args[0] && typeof args[0] === 'object') {
+        console.log('[DeepCool Linux] playerConfig', args[0]);
+      }
       return result;
     };
 
@@ -580,6 +584,7 @@
       }
     }
     // 重启软件后自动恢复上次保存的个性化设置（否则 LCD 只剩黑屏/纯色）
+    // 多媒体模式：尽量从 getAllMedia 的 isCurrent.frameDataUrl 恢复最近图
     async function restorePreset() {
       try {
         const saved = await invoke('linux/preset-load');
@@ -594,10 +599,20 @@
           };
           if (saved.brightnessControl !== undefined) lastBrightness = saved.brightnessControl;
           optionalZenActive = isOptionalZen(saved);
-          // 强制禅恢复为黑帧待机；可选禅/正常 → 推内容
+          // 恢复最近媒体帧（若有）
+          try {
+            const all = await invoke('l122/getAllMedia');
+            const lists = []
+              .concat((all && all.data && all.data.imageList) || [])
+              .concat((all && all.data && all.data.gifList) || []);
+            const cur = lists.find((m) => m && m.isCurrent && m.frameDataUrl)
+              || lists.slice().reverse().find((m) => m && m.frameDataUrl);
+            if (cur && cur.frameDataUrl) lastFrameDataUrl = cur.frameDataUrl;
+          } catch (_) {}
           applyDisplayMode(saved, 'restore');
           console.log('[DeepCool Linux] restored preset:', saved.digitalData,
-            'modeChange:', saved.modeChange, 'zen:', saved.zenMode, 'mandatory:', saved.mandatoryZenMode);
+            'modeChange:', saved.modeChange, 'zen:', saved.zenMode, 'mandatory:', saved.mandatoryZenMode,
+            'hasMediaFrame:', !!lastFrameDataUrl);
         }
       } catch (error) {
         console.error('[DeepCool Linux] restore preset failed:', error);
@@ -677,15 +692,51 @@
       }
     }
 
-    // 进入强制禅 / 浮层待机：停内容推流 + daemon 黑帧。
-    // 官方：mandatoryZenMode+zenMode → isZenStrict，显示 ZEN MODE 且禁止操作。
+    // 官方强制禅 UI 为深色底 + "ZEN MODE" 文案（rightDisplay isZenStrict），
+    // 不是纯黑。推一张静帧更接近官方观感；daemon zen 仍作模式标记。
+    function buildZenFrameDataUrl() {
+      const canvas = document.createElement('canvas');
+      canvas.width = 320;
+      canvas.height = 240;
+      const ctx = canvas.getContext('2d');
+      const g = ctx.createLinearGradient(0, 0, 320, 240);
+      g.addColorStop(0, '#050a12');
+      g.addColorStop(1, '#0b1220');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, 320, 240);
+      ctx.strokeStyle = 'rgba(53,224,255,0.35)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(24, 24, 272, 192);
+      ctx.fillStyle = '#35e0ff';
+      ctx.font = 'bold 36px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('ZEN MODE', 160, 115);
+      ctx.fillStyle = 'rgba(219,231,245,0.55)';
+      ctx.font = '14px system-ui, sans-serif';
+      ctx.fillText('DeepCool Linux', 160, 155);
+      return canvas.toDataURL('image/png');
+    }
+
+    // 进入强制禅 / 浮层待机：停内容推流 + 推 ZEN 静帧（对齐官方文案屏，非纯黑）。
     // 可选禅（仅 zenMode）不走这里，见 applyDisplayMode 降频推内容。
     async function enterZen(_opts) {
       stopLoop();
       zenActive = true;
       optionalZenActive = false;
       await invoke('linux/hold-state', true).catch(() => {});
+      // 先让 daemon 进入 zen 模式（黑帧保活线程会写黑，随后 image 覆盖为 ZEN 图）
       await invoke('linux/daemon-command', { action: 'zen' }).catch(() => {});
+      try {
+        const zenUrl = buildZenFrameDataUrl();
+        lastFrameDataUrl = zenUrl;
+        // force 推送：pushDataUrl 在 zenActive 时默认拒绝，这里需要上屏
+        frameBusy = false;
+        const result = await invoke('linux/push-image', zenUrl);
+        if (result && result.ok) lastPushedDataUrl = zenUrl;
+      } catch (error) {
+        console.error('[DeepCool Linux] zen frame push failed:', error);
+      }
       syncZenButton();
     }
 
