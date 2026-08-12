@@ -5,6 +5,8 @@ After=multi-user.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /usr/local/bin/deepcool-lm-daemon
+Group=deepcool
+UMask=0007
 Restart=always
 RestartSec=3
 RuntimeDirectory=deepcool-lm

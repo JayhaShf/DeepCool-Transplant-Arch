@@ -72,9 +72,11 @@ FORCE_EXTRACT=1 npm run extract
 npm run port:prepare
 ```
 
-运行时校验（先保持程序运行）：
+日常启动**默认关闭** Chromium 远程调试端口（CDP）。运行时校验需显式开启：
 
 ```bash
+npm run start:debug   # 等价 DEEPCOOL_CDP=1 npm start
+# 另一终端：
 npm run verify
 ```
 
@@ -85,7 +87,8 @@ npm run verify
 - 已打过补丁时不再每次重新执行 `prepare.sh`。
 - 加入单实例锁：应用已运行时再点桌面图标，会直接聚焦已有窗口并立即退出新进程。
 - 桌面入口增加 `StartupNotify=true`。
-- `run.sh` 内置启动重试：CDP 未就绪且进程退出时自动重试（pkill 后立即重启也稳）。
+- `run.sh` 内置启动重试：进程未就绪时自动重试（pkill 后立即重启也稳）；
+  开 CDP 时以调试端口身份校验为准，默认关闭 CDP 时以进程稳定存活为准。
 
 实测：干净启动到 CDP/页面就绪约 0.3–0.4 秒；重复点击立即聚焦已有窗口。
 
@@ -186,7 +189,8 @@ npm run uninstall:user
 ```bash
 lsusb -d 3633:0026
 systemctl status deepcool-lm-daemon.service
-ls -l /run/deepcool-lm/deepcool-lm.sock
+ls -l /run/deepcool-lm/deepcool-lm.sock   # 期望 srw-rw---- root deepcool
+groups | grep deepcool                   # 当前用户需在 deepcool 组（重登生效）
 ```
 
 ## LCD 内容由谁渲染（当前架构）
@@ -214,12 +218,14 @@ sudo bash scripts/reinstall-daemon.sh
 ```
 
 `install-daemon.sh` 会安装依赖（python-pyusb/python-psutil/python-pillow）、
-安装 systemd unit、启用启动 `deepcool-lm-daemon.service`（root 运行，
-自动重启，socket 0666，双实例保护）。详见 `daemon/README.md`。
+创建 `deepcool` 组并把安装用户加入该组、安装 systemd unit、启用启动
+`deepcool-lm-daemon.service`（root 运行、`Group=deepcool`、自动重启，
+socket **0660 root:deepcool**，双实例保护）。组权限需重新登录或
+`newgrp deepcool` 后生效。详见 `daemon/README.md`。
 
 ### daemon 协议摘要
 
-Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0666），JSON 请求：
+Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 root:deepcool），JSON 请求：
 
 | 动作 | 参数 | 说明 |
 |---|---|---|

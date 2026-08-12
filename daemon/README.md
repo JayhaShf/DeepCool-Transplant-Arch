@@ -10,19 +10,24 @@
 |---|---|
 | `deepcool-lm-daemon.py` | 单文件 daemon（socket 服务 + 传感器采样 + USB 推帧） |
 | `deepcool-lm-daemon.service` | systemd unit（root 运行，自动重启） |
-| `install-daemon.sh` | 一键安装：依赖 + unit + 启动 + 自检 |
+| `install-daemon.sh` | 一键安装：依赖 + deepcool 组 + unit + 启动 + 自检 |
 
 ## 安装
 
 ```bash
 sudo bash daemon/install-daemon.sh
+# 组权限需重新登录或: newgrp deepcool
+groups | grep deepcool
 ```
 
 依赖（Arch）：`python-pyusb`、`python-psutil`、`python-pillow`（脚本自动装）。
 
+访问控制：socket **0660 root:deepcool**（仅 root 与 `deepcool` 组成员可连接）。
+`install-daemon.sh` 会 `groupadd -f deepcool` 并把 `SUDO_USER` 加入该组。
+
 ## 协议（与移植层锁定一致）
 
-Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0666），JSON 请求，
+Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 root:deepcool），JSON 请求，
 一次连接一个请求（发送后 shutdown 写端，服务端读到 EOF 后响应并关闭）。
 
 | 动作 | 参数 | 响应 |

@@ -15,7 +15,7 @@ else
   echo "  （当前没有已安装的 deepcool-* 包）"
 fi
 
-echo "[2/3] 安装 Python daemon（依赖 + systemd unit + deepcool 组）"
+echo "[2/3] 安装 Python daemon（依赖 + deepcool 组 + systemd unit）"
 "$ROOT/daemon/install-daemon.sh"
 
 echo "[3/3] 禁用原生渲染占位（Python daemon 无原生渲染，LCD 内容完全由移植层推帧）"

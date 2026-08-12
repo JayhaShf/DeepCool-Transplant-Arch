@@ -10,10 +10,13 @@ test -f "$APP/resources/app.asar.extracted/out/main/linux-compat.js"
 test -f "$APP/resources/app.asar.extracted/out/renderer/linux-overlay.js"
 grep -q 'linux-compat.js' "$APP/resources/app.asar.extracted/out/main/bytecode-loader.js"
 grep -q 'linux-overlay.js' "$APP/resources/app.asar.extracted/out/renderer/index.html"
-node --check "$APP/resources/app.asar.extracted/out/main/linux-compat.js"
+# 补丁源文件语法（work/ 内可能仍是旧副本，以 patches/ 为准）
+node --check "$ROOT/patches/linux-compat.js"
+node --check "$ROOT/patches/linux-overlay.js"
 printf 'Electron: '; "$ROOT/node_modules/.bin/electron" --version 2>/dev/null | tail -n1
 printf 'USB:      '; lsusb -d 3633:0026 | head -n1
 printf 'Daemon:   '; systemctl is-active deepcool-lm-daemon.service 2>/dev/null || true
+printf 'Socket:   '; ls -l /run/deepcool-lm/deepcool-lm.sock 2>/dev/null || echo '(missing)'
 
 if curl -fsS "http://127.0.0.1:$PORT/json" >/dev/null 2>&1; then
   echo '--- 运行时校验 ---'
@@ -23,7 +26,11 @@ if curl -fsS "http://127.0.0.1:$PORT/json" >/dev/null 2>&1; then
   grep -q '"overlay": true' /tmp/deepcool-port-verify.json
   grep -q '"ok": true' /tmp/deepcool-port-verify.json
   grep -q '"productName": "LM-Series"' /tmp/deepcool-port-verify.json
-  echo '运行时断言通过。' 
+  echo '运行时断言通过。'
 else
-  echo "运行时未启动（端口 $PORT 无 CDP）；先执行 npm start，再运行 npm run verify。"
+  echo "运行时未启动或未开 CDP（端口 $PORT 无响应）。"
+  echo "日常启动默认关闭 CDP；运行时校验请："
+  echo "  npm run start:debug"
+  echo "  # 另一终端："
+  echo "  npm run verify"
 fi

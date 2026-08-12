@@ -213,7 +213,17 @@ function daemonRequest(request, timeoutMs = 3000) {
         finish(reject, error);
       }
     });
-    socket.on('error', (error) => finish(reject, error));
+    socket.on('error', (error) => {
+      // socket 现为 0660 root:deepcool；未加入 deepcool 组或未重新登录时 connect 会 EACCES
+      const code = error && error.code;
+      if (code === 'EACCES' || code === 'EPERM') {
+        finish(reject, new Error(
+          'deepcool-lm daemon socket permission denied（加入 deepcool 组后重新登录或执行 newgrp deepcool）'
+        ));
+        return;
+      }
+      finish(reject, error);
+    });
   });
 }
 
@@ -276,9 +286,10 @@ async function daemonStatus() {
   const now = Date.now();
   if (statusCache && now - statusAt < 700) return statusCache;
   if (statusPending) return statusPending;
-  // 先占位再发 monitor：两个并发调用（linux/status 与 app/get-sensors-data 同时
-  // 冷 cache）时，后到者复用同一 in-flight 请求，避免 monitor 重复发送与
-  // statusPending 被后赋值覆盖导致的请求风暴。
+  // 两个并发调用（linux/status 与 app/get-sensors-data 同时冷 cache）时，
+  // 后到者复用同一 in-flight 请求，避免 statusPending 被覆盖导致的请求风暴。
+  // 注意：Python daemon 始终采样，这里只读 status，不再副作用切 monitor
+  // （旧逻辑会在 hold 间隙把 LCD 刷黑）。
   statusPending = daemonRequest({ action: 'status' })
     .then((status) => {
       // 仅当响应含 snapshot 时缓存（zen 等命令的响应没有 snapshot，
@@ -294,14 +305,6 @@ async function daemonStatus() {
       return fallbackStatus(error);
     })
     .finally(() => { statusPending = null; });
-  // 传感器采样：新 daemon 默认 auto 模式不采样，需要短暂处于 monitor 模式
-  // 才会更新快照（monitor 模式渲染的是黑色空页，不产生任何可见内容）。
-  // 注意：外部推帧（预设/图片/预览）激活时不能切 monitor，否则会覆盖画面。
-  if (!externalHoldActive) {
-    await daemonRequest({ action: 'monitor' }).catch((error) => {
-      log('ensure monitor failed:', error);
-    });
-  }
   return statusPending;
 }
 

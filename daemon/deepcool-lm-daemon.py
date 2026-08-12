@@ -6,7 +6,7 @@ deepcool-lm-daemon.py — DeepCool LM-Series LCD daemon（Linux / Python 重写�
 原 Rust daemon（deepcool-lm-rust）源码已丢失（重装系统 + GitHub 无备份），
 本文件按 DeepCool-Transplant-Arch 移植层锁定的协议规格重写，保证兼容：
 
-  - Unix socket  `/run/deepcool-lm/deepcool-lm.sock`（0666，root 运行）
+  - Unix socket  `/run/deepcool-lm/deepcool-lm.sock`（0660 root:deepcool，root 运行）
     JSON 请求（一次连接一个请求，读到 EOF 结束），动作：
       {"action": "status"}                                  → {ok, mode, snapshot}
       {"action": "monitor"}                                 → 监控模式（纯黑帧，保持采样）
@@ -31,6 +31,7 @@ deepcool-lm-daemon.py — DeepCool LM-Series LCD daemon（Linux / Python 重写�
 
 import argparse
 import base64
+import grp
 import io
 import json
 import os
@@ -461,9 +462,18 @@ class Daemon:
             pass
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(self.socket_path)
-        os.chmod(self.socket_path, 0o666)
+        # 0660 root:deepcool：仅 root 与 deepcool 组成员可连接（任意本地用户
+        # 不可再推帧/改亮度）。组不存在时仍 0660（等同 root-only，避免回退 0666）。
+        try:
+            gid = grp.getgrnam("deepcool").gr_gid
+            os.chown(self.socket_path, 0, gid)
+        except KeyError:
+            log("警告: 用户组 deepcool 不存在，socket 将仅 root 可写（请运行 install-daemon.sh）")
+        except OSError as exc:
+            log("警告: chown deepcool 失败:", exc)
+        os.chmod(self.socket_path, 0o660)
         server.listen(8)
-        log(f"socket 就绪: {self.socket_path}")
+        log(f"socket 就绪: {self.socket_path} (0660)")
 
         while self._running:
             try:

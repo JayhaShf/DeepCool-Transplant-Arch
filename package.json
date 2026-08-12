@@ -9,6 +9,7 @@
     "extract": "bash scripts/extract.sh",
     "port:prepare": "bash scripts/prepare.sh",
     "start": "bash scripts/run.sh",
+    "start:debug": "DEEPCOOL_CDP=1 bash scripts/run.sh",
     "verify": "bash scripts/verify.sh",
     "install:user": "bash scripts/install-user.sh",
     "uninstall:user": "bash scripts/uninstall-user.sh",
