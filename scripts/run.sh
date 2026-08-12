@@ -10,6 +10,43 @@ USER_DATA_DIR="${DEEPCOOL_USER_DATA_DIR:-$HOME/.config/DeepCool-Linux-Port}"
 LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/deepcool-official-linux"
 LOG_FILE="$LOG_DIR/app.log"
 
+# daemon socket 为 0660 root:deepcool。用户已在 deepcool 组但当前会话未加载
+# （未重新登录）时 connect 会 EACCES，LCD 无画面。用 newgrp 重入补上有效组。
+# DEEPCOOL_GROUP_ACTIVE=1 防止 newgrp 后无限重入。
+if [ "${DEEPCOOL_GROUP_ACTIVE:-0}" != "1" ] && command -v newgrp >/dev/null 2>&1; then
+  if getent group deepcool >/dev/null 2>&1; then
+    _me="$(id -un 2>/dev/null || true)"
+    _in_file=0
+    if [ -n "$_me" ] && getent group deepcool | awk -F: -v u="$_me" '{print "," $4 ","}' | grep -q ",${_me},"; then
+      _in_file=1
+    fi
+    _active=0
+    if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx deepcool; then
+      _active=1
+    fi
+    if [ "$_in_file" = 1 ] && [ "$_active" = 0 ]; then
+      export DEEPCOOL_GROUP_ACTIVE=1
+      # 保留启动相关环境变量，经 newgrp 后继续本脚本
+      exec newgrp deepcool <<EOF
+export DEEPCOOL_GROUP_ACTIVE=1
+export DEEPCOOL_CDP='${DEEPCOOL_CDP-}'
+export DEEPCOOL_BACKGROUND='${DEEPCOOL_BACKGROUND-}'
+export REMOTE_DEBUG_PORT='${REMOTE_DEBUG_PORT-}'
+export DEEPCOOL_APP_DIR='${DEEPCOOL_APP_DIR-}'
+export DEEPCOOL_ELECTRON='${DEEPCOOL_ELECTRON-}'
+export DEEPCOOL_USER_DATA_DIR='${DEEPCOOL_USER_DATA_DIR-}'
+export DEEPCOOL_REPREPARE='${DEEPCOOL_REPREPARE-}'
+export DEEPCOOL_SERIAL='${DEEPCOOL_SERIAL-}'
+export XDG_CACHE_HOME='${XDG_CACHE_HOME-}'
+export XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR-}'
+export PATH=$(printf '%q' "$PATH")
+cd $(printf '%q' "$ROOT")
+exec bash $(printf '%q' "$ROOT/scripts/run.sh") $(printf '%q ' "$@")
+EOF
+    fi
+  fi
+fi
+
 # CDP：默认关闭（任意本地用户可对调试端口 Runtime.evaluate）。
 # 调试/verify：DEEPCOOL_CDP=1 npm start  或  npm run start:debug
 case "${DEEPCOOL_CDP:-0}" in
