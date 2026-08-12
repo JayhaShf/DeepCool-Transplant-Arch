@@ -407,24 +407,17 @@
         const cfg = args[0] || presetConfig;
         presetConfig = cfg;
         if (cfg && cfg.brightnessControl !== undefined) lastBrightness = cfg.brightnessControl;
-        lastModeChange = cfg ? Number(cfg.modeChange) : 0; // 同步模式基线
-        // 官方"禅状态"开关 → 待机（LCD 关闭，不推帧）；关闭则恢复推帧。
+        // 官方"禅状态"开关 → 待机；关闭则按 modeChange 恢复推帧。
         // 注意：切换数字/多媒体模式也会触发 modelConfigurationSet，且携带的
         // GlobalSetting.zenMode 可能残留 true（官方 store 持久化）——若刚发生过
         // 模式切换（applyModeChange），忽略该残留，避免"切模式就黑屏"。
         const justSwitchedMode = Date.now() - lastModeSwitchAt < 1500;
         if (cfg && cfg.zenMode === true && !justSwitchedMode) {
+          lastModeChange = cfg ? Number(cfg.modeChange) : 0;
           enterZen();
         } else {
-          zenActive = false;
-          // 多媒体模式（modeChange=1）：LCD 显示当前媒体图（若已上传图片），
-          // 否则显示最近一帧（lastFrameDataUrl）。数字模式（modeChange=0）推预设。
-          if (cfg && cfg.modeChange === 1 && lastFrameDataUrl) {
-            // 若当前就是图片循环则保持；否则切到图片显示
-            if (currentMode !== 'image') startImageLoop(lastFrameDataUrl);
-          } else {
-            startLoop('preset');
-          }
+          // 统一走 applyModeChange：纠正 image/preview 下配置值未变导致无法回数字模式
+          applyModeChange(cfg ? Number(cfg.modeChange) || 0 : 0, true);
           syncZenButton();
         }
         // 持久化，重启后自动恢复
@@ -442,12 +435,22 @@
     // 文本时更新 presetConfig.modeChange 并同步 LCD 显示模式。
     let lastModeChange = null;
     let lastModeSwitchAt = 0; // 最近一次模式切换时间（modelConfigurationSet 判断用）
-    function applyModeChange(mc) {
-      if (mc === lastModeChange) return;
+    function applyModeChange(mc, force = false) {
+      // 目标推帧形态：数字=preset；多媒体=有图则 image，否则先 preset 占位。
+      // 注意：上传图片会 startImageLoop 但不改 lastModeChange——此时 lastModeChange
+      // 仍可能是 0，若仅用 mc===lastModeChange 短路，再点「数字模式」会直接 return，
+      // LCD 卡在 image/preview。必须结合 currentMode/active/zen 判断是否已到位。
+      const wantImage = mc === 1 && !!lastFrameDataUrl;
+      const alreadyOnTarget = !zenActive && active && (
+        (wantImage && currentMode === 'image') ||
+        (!wantImage && mc === 0 && currentMode === 'preset') ||
+        (mc === 1 && !lastFrameDataUrl && currentMode === 'preset')
+      );
+      if (!force && mc === lastModeChange && alreadyOnTarget) return;
       lastModeChange = mc;
       lastModeSwitchAt = Date.now();
       if (presetConfig) presetConfig.modeChange = mc;
-      console.log('[DeepCool Linux] modeChange:', mc);
+      console.log('[DeepCool Linux] modeChange:', mc, 'force=', force, 'currentMode=', currentMode);
       // 待机中切换模式：用户主动操作个性化设置 = 想看效果，自动退出待机
       // （同步清标志 + 放行 hold），再应用新模式；官方禅状态开关显示由
       // modelConfigurationSet 下次保存时同步。
@@ -456,20 +459,30 @@
         invoke('linux/hold-state', false).catch(() => {});
         syncZenButton();
       }
-      if (mc === 1 && lastFrameDataUrl) {
-        // 多媒体模式：显示当前媒体图/最近帧
+      if (wantImage) {
         startImageLoop(lastFrameDataUrl);
-      } else if (mc === 0) {
+      } else {
+        // 数字模式，或多媒体但尚无可用帧：走官方数字布局推帧
         startLoop('preset');
       }
     }
     document.addEventListener('click', (event) => {
-      const el = event.target && event.target.closest ? event.target.closest('div,span,button,li') : null;
-      if (!el) return;
-      const text = (el.textContent || '').trim();
-      if (text === '多媒体模式') { applyModeChange(1); return; }
-      if (text === '数字模式') { applyModeChange(0); return; }
-    }, true); // 捕获阶段：先于官方 Vue handler，且官方 handler 不改变同步结果
+      // 向上多看几层：官方下拉项可能是 span 包在 div 里，或 text 含空白/子节点。
+      let node = event.target;
+      for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+        if (!node.getAttribute && !node.textContent) continue;
+        const text = String(node.textContent || '').replace(/\s+/g, ' ').trim();
+        // 只匹配短标签，避免点到整页容器误触发
+        if (text === '多媒体模式' || text === 'Multimedia Mode' || text === 'Multimedia') {
+          applyModeChange(1, true);
+          return;
+        }
+        if (text === '数字模式' || text === 'Digital Mode' || text === 'Digital') {
+          applyModeChange(0, true);
+          return;
+        }
+      }
+    }, true); // 捕获阶段：先于官方 Vue handler
 
     // 推送预览集成到软件：进入 LM-Series 页面后自动把页面预览截图推送到 LCD
     // （立即生效，无需任何按钮）；离开页面或激活预设/图片后自动停止/让位。
