@@ -10,7 +10,7 @@
 |---|---|
 | `deepcool-lm-daemon.py` | 单文件 daemon（socket 服务 + 传感器采样 + USB 推帧） |
 | `deepcool-lm-daemon.service` | systemd unit（root 运行，自动重启） |
-| `install-daemon.sh` | 一键安装：依赖 + unit + deepcool 组 + 启动 + 自检 |
+| `install-daemon.sh` | 一键安装：依赖 + unit + 启动 + 自检 |
 
 ## 安装
 
@@ -29,7 +29,7 @@ Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0666），JSON 请求，
 |---|---|---|
 | `status` | — | `{ok, mode, snapshot}` |
 | `monitor` | — | 监控模式（LCD 黑屏 + 持续采样） |
-| `zen` | — | 待机（USB zen 命令 + 黑屏） |
+| `zen` | — | 待机（黑帧待机：LCD 显示纯黑，恢复推帧即点亮；不使用硬件 zen toggle 命令，见下） |
 | `image` | `data`: PNG base64 | 解码 320×240 → RGB565 → USB 推帧，持续重发 |
 | `brightness` | `direction`: `up`/`down` | 硬件亮度步进 |
 
@@ -46,7 +46,9 @@ psutil（使用率/频率/内存/磁盘网络速率差分）、nvidia-smi（GPU 
 - 设备：`3633:0026`（DeepCool LM-Series），Bulk OUT `0x01`
 - 帧：13 字节帧头 `aa 08 00 00 01 00 58 02 00 2c 01 bc 11` + 153600 字节 RGB565 小端
 - 命令：brightness_up `aa 04 00 06 03 61 00 d2 46`、brightness_down `aa 04 00 06 03 1d 00 e6 0b`、
-  zen `aa 04 00 03 00 00 00 dc 9b`、init `aa 01 00 09 29 91`
+  init `aa 01 00 09 29 91`
+- 待机不使用硬件 zen 命令（`aa 04 00 03 00 00 00 dc 9b`）：toggle 是"切换"语义，
+  关屏后恢复推帧不保证重新开屏（LCD 保持黑屏）；黑帧待机恢复推帧时自然点亮。
 - 以上命令来自 [daedlock/deepcool-lm](https://github.com/daedlock/deepcool-lm)
   （LM360 实测）；设备型号不同时帧头/命令可能需要调整
 

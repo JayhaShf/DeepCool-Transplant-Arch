@@ -225,7 +225,7 @@ Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0666），JSON 请求：
 |---|---|---|
 | `status` | — | `{ok, mode, snapshot}`（snapshot 字段与 linux-compat 完全一致） |
 | `monitor` | — | 监控模式（LCD 黑屏 + 持续采样） |
-| `zen` | — | 待机（USB zen 命令 + 不推帧） |
+| `zen` | — | 待机（黑帧：LCD 纯黑，恢复推帧即点亮；不使用硬件 zen toggle） |
 | `image` | `data`: PNG base64 | 320×240 RGB565 推帧，持续重发 |
 | `brightness` | `direction`: up/down | 硬件亮度步进 |
 
@@ -284,7 +284,8 @@ Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0666），JSON 请求：
 - **推帧并发堆积**：1 秒推帧加 in-flight 保护 + capture 4s 超时。
 - **多媒体模式**：捕获官方下拉点击，`modeChange` 实时切换 LCD 模式，
   重启按保存的模式恢复。
-- **禅状态开关**：官方开关桥接 `linux/daemon-command zen`。
+- **禅状态开关**：官方开关桥接 `linux/daemon-command zen`（黑帧待机，
+  恢复推帧即点亮，不依赖硬件 zen toggle）。
 - **开机自启**：官方设置页开关写/删 XDG autostart 文件（`app/set-setting`
   拦截 + 状态校准）。
 - **CPU 频率单位**：daemon 上报 GHz，渲染层 ×1000 转 MHz 显示。

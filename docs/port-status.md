@@ -1,5 +1,9 @@
 # DeepCool 1.2.12 Linux 移植状态
 
+> 本文是逐次修复的历史 changelog；当前协议/行为以 `README.md` 与
+> `daemon/README.md` 为准（例如：`linux/daemon-command` 白名单现仅 `status`/`zen`，
+> zen 为黑帧待机，推帧周期为 1 秒）。
+
 日期：2026-08-09
 
 ## 结论
@@ -16,7 +20,7 @@
 - `app/get-device-list` → 官方枚举，失败时 sysfs fallback
 - `l122/image-transmission` → Linux 动态 320×240 SVG 预览
 - `linux/capture-preview` → Electron `capturePage` → PNG → daemon `image`
-- `linux/daemon-command` → `monitor` / `zen` / `brightness`
+- `linux/daemon-command` → `zen`（`status` 由 `linux/status` 承担）
 
 ## 尚未移植
 

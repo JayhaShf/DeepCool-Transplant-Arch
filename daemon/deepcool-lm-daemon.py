@@ -10,16 +10,18 @@ deepcool-lm-daemon.py — DeepCool LM-Series LCD daemon（Linux / Python 重写�
     JSON 请求（一次连接一个请求，读到 EOF 结束），动作：
       {"action": "status"}                                  → {ok, mode, snapshot}
       {"action": "monitor"}                                 → 监控模式（纯黑帧，保持采样）
-      {"action": "zen"}                                     → 待机（USB zen 命令 + 黑屏）
+      {"action": "zen"}                                     → 待机（黑帧：LCD 纯黑，恢复推帧即点亮）
       {"action": "image", "data": "<png base64>"}           → 显示图片（320×240 RGB565 推帧）
       {"action": "brightness", "direction": "up"|"down"}    → 硬件亮度步进
     snapshot 字段与 linux-compat.js 的 fallbackStatus() 完全一致。
 
-  - 传感器：psutil + hwmon coretemp/k10temp + RAPL + nvidia-smi，
-    始终采样（static/zen 模式下也实时更新，对应原 21:27 版行为）。
+    - 传感器：psutil + hwmon coretemp/k10temp + RAPL + nvidia-smi，
+      始终采样（static/zen 模式下也实时更新，对应原 21:27 版行为）。
 
-  - USB：3633:0026，Bulk OUT 0x01；帧 = 13 字节帧头 + 153600 字节 RGB565 小端。
-    USB 命令（帧头/亮度/zen/init）来自 daedlock/deepcool-lm（LM360 实测）。
+    - USB：3633:0026，Bulk OUT 0x01；帧 = 13 字节帧头 + 153600 字节 RGB565 小端。
+      USB 命令（帧头/亮度/init）来自 daedlock/deepcool-lm（LM360 实测）。
+      zen 不使用硬件 toggle 命令：toggle 是"切换"语义，关屏后恢复推帧不保证
+      重新开屏（LCD 保持黑屏）；黑帧待机恢复推帧时 LCD 自然点亮。
 
   - 无内置 web API（8642 已按用户要求移除）；lcd.json 由 install 脚本直接写入。
 
@@ -51,7 +53,6 @@ HEIGHT = 240
 FRAME_HEADER = bytes([0xaa, 0x08, 0x00, 0x00, 0x01, 0x00, 0x58, 0x02, 0x00, 0x2c, 0x01, 0xbc, 0x11])
 CMD_BRIGHTNESS_UP = bytes([0xaa, 0x04, 0x00, 0x06, 0x03, 0x61, 0x00, 0xd2, 0x46])
 CMD_BRIGHTNESS_DOWN = bytes([0xaa, 0x04, 0x00, 0x06, 0x03, 0x1d, 0x00, 0xe6, 0x0b])
-CMD_ZEN_TOGGLE = bytes([0xaa, 0x04, 0x00, 0x03, 0x00, 0x00, 0x00, 0xdc, 0x9b])
 CMD_INIT_QUERY = bytes([0xaa, 0x01, 0x00, 0x09, 0x29, 0x91])
 
 SAMPLE_INTERVAL = 2.0   # 传感器采样周期
@@ -135,17 +136,18 @@ class LMDevice:
             return self._raw_write(data)
 
     def send_frame(self, framebuffer):
-        self.write(FRAME_HEADER)
-        self.write(framebuffer)
+        """帧头 + 负载在同一把锁内连续发送：
+        分两次 write（各拿一次锁）会让并发 brightness/其他帧插在两者之间，
+        设备收到坏帧。"""
+        with self._lock:
+            self._raw_write(FRAME_HEADER)
+            self._raw_write(framebuffer)
 
     def brightness_up(self):
         self.write(CMD_BRIGHTNESS_UP)
 
     def brightness_down(self):
         self.write(CMD_BRIGHTNESS_DOWN)
-
-    def zen_toggle(self):
-        self.write(CMD_ZEN_TOGGLE)
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +357,6 @@ class Daemon:
         self._mode = "monitor"       # monitor | image | zen
         self._frame = None           # image 模式帧
         self._running = True
-        self._usb_ok = False
 
     # ---- 状态 ----
 
@@ -379,8 +380,10 @@ class Daemon:
             self.set_mode("monitor")
             return {"ok": True, "mode": "monitor"}
         if action == "zen":
+            # 待机 = 显示黑帧（视觉黑屏），不依赖硬件 zen 命令：
+            # toggle 是"切换"语义，关屏后恢复推帧不保证重新开屏（LCD 保持黑屏）。
+            # 黑帧待机无此问题：恢复推帧时 LCD 自然点亮。
             self.set_mode("zen")
-            self.device.zen_toggle()
             return {"ok": True, "mode": "zen"}
         if action == "image":
             try:
@@ -410,15 +413,15 @@ class Daemon:
         """连接 USB（设备可能晚出现，重试），掉线自动重连。"""
         while self._running:
             if not self.device.connected:
-                self._usb_ok = self.device.connect()
-                if not self._usb_ok:
+                if not self.device.connect():
                     time.sleep(3)
                     continue
             time.sleep(2)
 
     def frame_loop(self):
-        """按当前模式持续重发帧：monitor 黑屏保持，image 最后帧。
-        zen 模式不推帧：zen 命令已让设备进入待机，持续推黑帧会唤醒/点亮设备。"""
+        """按当前模式持续重发帧：monitor/zen 黑屏保持，image 最后帧。
+        黑帧待机：保持 LCD 显示黑色（视觉待机），不依赖硬件 zen toggle，
+        恢复推帧时 LCD 自然点亮。"""
         while self._running:
             if self.device.connected:
                 mode = self.mode()
@@ -427,9 +430,8 @@ class Daemon:
                         fb = self._frame
                     if fb is not None:
                         self.device.send_frame(fb)
-                elif mode == "monitor":
+                else:  # monitor / zen：黑屏
                     self.device.send_frame(black_framebuffer())
-                # zen：不推任何帧
             time.sleep(FRAME_INTERVAL)
 
     def sample_loop(self):

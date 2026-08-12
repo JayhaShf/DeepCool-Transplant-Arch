@@ -740,10 +740,9 @@ originalHandle('linux/status', async () => {
 });
 originalHandle('linux/daemon-command', async (_event, request) => {
   const payload = typeof request === 'string' ? { action: request } : { ...(request || {}) };
-  // 用户可见命令仅保留 status/zen（监控切换已按要求移除）。
+  // 用户可见命令仅保留 status/zen（监控/亮度切换已按要求移除）。
   const allowed = new Set(['status', 'zen']);
   if (!allowed.has(payload.action)) throw new Error(`Linux bridge 不允许命令: ${payload.action}`);
-  if (payload.action === 'brightness') payload.direction = payload.direction === 'down' ? 'down' : 'up';
   delete payload.data;
   delete payload.color;
   const response = await daemonRequest(payload);
