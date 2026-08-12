@@ -462,8 +462,11 @@ class Daemon:
             pass
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(self.socket_path)
-        # 0660 root:deepcool：仅 root 与 deepcool 组成员可连接（任意本地用户
-        # 不可再推帧/改亮度）。组不存在时仍 0660（等同 root-only，避免回退 0666）。
+        # 0660 root:deepcool：默认仅 root / deepcool 组成员可连。
+        # 另：对 deepcool 组内每个用户写 POSIX ACL (u:name:rw)。
+        # 原因：usermod -aG 后若不注销，登录会话的凭证里永远没有 deepcool，
+        # id/groups 无该组，仅靠 0660 组位会 EACCES；ACL 按 UID 授权，
+        # 不依赖会话是否已加载 supplementary group。
         try:
             gid = grp.getgrnam("deepcool").gr_gid
             os.chown(self.socket_path, 0, gid)
@@ -472,8 +475,9 @@ class Daemon:
         except OSError as exc:
             log("警告: chown deepcool 失败:", exc)
         os.chmod(self.socket_path, 0o660)
+        self._apply_socket_acl(self.socket_path)
         server.listen(8)
-        log(f"socket 就绪: {self.socket_path} (0660)")
+        log(f"socket 就绪: {self.socket_path} (0660+ACL)")
 
         while self._running:
             try:
@@ -489,6 +493,32 @@ class Daemon:
             os.unlink(self.socket_path)
         except OSError:
             pass
+
+    @staticmethod
+    def _apply_socket_acl(path):
+        """给 deepcool 组成员加 user ACL，使未 re-login 的会话也能 connect。"""
+        try:
+            members = list(grp.getgrnam("deepcool").gr_mem)
+        except KeyError:
+            members = []
+        if not members:
+            return
+        try:
+            import subprocess
+            # -m 可多次；合并为一次 setfacl 调用
+            specs = [f"u:{name}:rw" for name in members if name and name != "root"]
+            if not specs:
+                return
+            cmd = ["setfacl", "-m", ",".join(specs), path]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if r.returncode != 0:
+                log("setfacl 警告:", (r.stderr or r.stdout or "").strip() or r.returncode)
+            else:
+                log("socket ACL:", ",".join(specs))
+        except FileNotFoundError:
+            log("警告: 无 setfacl，未 re-login 的用户可能无法连接 socket（pacman -S acl）")
+        except Exception as exc:
+            log("setfacl 失败:", exc)
 
     def _serve_conn(self, conn):
         try:

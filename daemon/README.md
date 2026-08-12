@@ -16,18 +16,19 @@
 
 ```bash
 sudo bash daemon/install-daemon.sh
-# 组权限需重新登录或: newgrp deepcool
-groups | grep deepcool
+# 账号是否在组：groups jay | grep deepcool
+# 当前会话 id 未必有 deepcool（登录早于加组时正常），不必强求
 ```
 
-依赖（Arch）：`python-pyusb`、`python-psutil`、`python-pillow`（脚本自动装）。
+依赖（Arch）：`python-pyusb`、`python-psutil`、`python-pillow`（脚本自动装）；`acl`（setfacl）。
 
-访问控制：socket **0660 root:deepcool**（仅 root 与 `deepcool` 组成员可连接）。
-`install-daemon.sh` 会 `groupadd -f deepcool` 并把 `SUDO_USER` 加入该组。
+访问控制：socket **0660 root:deepcool**，并对组成员写 **POSIX ACL**（`u:用户:rw`）。
+- `usermod -aG` 后若不注销，`id`/`id -nG` **不会**出现 deepcool（会话凭证固定）；
+- ACL 按 UID 授权，**无需 re-login** 也能 connect；`run.sh` 另有 newgrp 兜底。
 
 ## 协议（与移植层锁定一致）
 
-Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 root:deepcool），JSON 请求，
+Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 root:deepcool + 用户 ACL），JSON 请求，
 一次连接一个请求（发送后 shutdown 写端，服务端读到 EOF 后响应并关闭）。
 
 | 动作 | 参数 | 响应 |

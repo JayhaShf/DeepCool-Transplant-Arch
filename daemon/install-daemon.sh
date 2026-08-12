@@ -24,7 +24,10 @@ else
   echo "  未检测到 SUDO_USER；请手动将桌面用户加入组："
   echo "    sudo usermod -aG deepcool <你的用户名>"
 fi
-echo "  注意：组权限在重新登录（或 newgrp deepcool）后生效"
+echo "  说明: usermod 后「当前已登录会话」的 id/groups 不会出现 deepcool，"
+echo "        直到注销重登。daemon 会用 setfacl 按用户 ACL 授权，无需重登也能连。"
+# 确保 acl 工具可用（setfacl）
+pacman -S --needed --noconfirm acl >/dev/null 2>&1 || true
 
 echo "[3/5] 安装 daemon 与 systemd unit"
 install -m 0755 "$SRC" "$BIN"
@@ -35,12 +38,17 @@ systemctl daemon-reload
 systemctl stop deepcool-lm-daemon.service 2>/dev/null || true
 systemctl enable --now deepcool-lm-daemon.service
 sleep 2
+# 双保险：安装用户 ACL（daemon 启动时也会写组成员 ACL）
+if [ -n "$INSTALL_USER" ] && [ "$INSTALL_USER" != "root" ] && [ -S /run/deepcool-lm/deepcool-lm.sock ]; then
+  setfacl -m "u:${INSTALL_USER}:rw" /run/deepcool-lm/deepcool-lm.sock 2>/dev/null || true
+fi
 
 echo "[5/5] 验证"
 echo
 echo "===== 验证 ====="
 systemctl is-active deepcool-lm-daemon.service
-ls -l /run/deepcool-lm/deepcool-lm.sock
+command ls -la /run/deepcool-lm/deepcool-lm.sock
+getfacl -p /run/deepcool-lm/deepcool-lm.sock 2>/dev/null | head -20 || true
 python3 - <<'PY'
 import socket, json, os, grp
 path = "/run/deepcool-lm/deepcool-lm.sock"
@@ -75,8 +83,9 @@ print("gpu_temp:", snap.get("gpu_temp"), "mem_percent:", snap.get("mem_percent")
 PY
 if [ -n "${INSTALL_USER:-}" ] && [ "$INSTALL_USER" != "root" ]; then
   echo
-  echo "若 Electron 报 socket permission denied，请重新登录或执行："
-  echo "  newgrp deepcool"
-  echo "然后确认: groups | grep deepcool"
+  echo "用户 $INSTALL_USER 已在 deepcool 组（groups $INSTALL_USER 可见）。"
+  echo "当前图形会话若登录早于加组，id 仍可能没有 deepcool —— 这是正常的，"
+  echo "不必强求 id 出现该组；socket ACL 已按 UID 授权。"
+  echo "若希望 id 也显示 deepcool：注销并重新登录即可。"
 fi
 echo "完成。"

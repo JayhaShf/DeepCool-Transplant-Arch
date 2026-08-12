@@ -189,8 +189,8 @@ npm run uninstall:user
 ```bash
 lsusb -d 3633:0026
 systemctl status deepcool-lm-daemon.service
-ls -l /run/deepcool-lm/deepcool-lm.sock   # 期望 srw-rw---- root deepcool
-groups | grep deepcool                   # 当前用户需在 deepcool 组（重登生效）
+command ls -la /run/deepcool-lm/deepcool-lm.sock   # 期望 srw-rw----+ root deepcool（+ 表示有 ACL）
+groups "$USER" | grep deepcool                    # 账号在组即可；当前会话 id 可能暂无该组
 ```
 
 ## LCD 内容由谁渲染（当前架构）
