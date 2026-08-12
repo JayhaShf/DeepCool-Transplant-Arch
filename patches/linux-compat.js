@@ -846,15 +846,22 @@ originalHandle('linux/autostart-set', async (_event, request) => {
   }
   return { ok: true, enabled: fs.existsSync(AUTOSTART_FILE), path: AUTOSTART_FILE };
 });
+// 推图串行化：避免 overlay/多路同时打满 socket + USB
+let pushImageChain = Promise.resolve();
 originalHandle('linux/push-image', async (_event, dataUrl) => {
-  log('push-image called');
-  const match = String(dataUrl || '').match(/^data:image\/png;base64,(.+)$/);
-  if (!match) throw new Error('需要 PNG data URL');
-  const png = Buffer.from(match[1], 'base64');
-  if (png.length === 0) throw new Error('图片为空');
-  // 上限与 daemonRequest 的 20MB 请求体一致：base64 后 ≈ ×4/3，14MB PNG 安全
-  if (png.length > 14 * 1024 * 1024) throw new Error('图片过大（最大 14MB）');
-  return daemonRequest({ action: 'image', data: png.toString('base64') }, 8000);
+  const run = async () => {
+    const match = String(dataUrl || '').match(/^data:image\/png;base64,(.+)$/);
+    if (!match) throw new Error('需要 PNG data URL');
+    const png = Buffer.from(match[1], 'base64');
+    if (png.length === 0) throw new Error('图片为空');
+    if (png.length > 14 * 1024 * 1024) throw new Error('图片过大（最大 14MB）');
+    // 超时略放宽：daemon 解码 PNG 时可能短暂忙
+    return daemonRequest({ action: 'image', data: png.toString('base64') }, 12000);
+  };
+  const next = pushImageChain.then(run, run);
+  // 不让单次失败掐断后续链路
+  pushImageChain = next.then(() => {}, () => {});
+  return next;
 });
 async function captureImageDataUrl(event, rect) {
   const bounds = {

@@ -1,6 +1,8 @@
 [Unit]
 Description=DeepCool LM-Series LCD daemon (Linux Python port)
-After=multi-user.target
+# 等 USB 子系统起来，避免开机抢在枚举前 reset 风暴
+After=multi-user.target systemd-udevd.service
+Wants=systemd-udevd.service
 
 [Service]
 Type=simple
@@ -8,7 +10,9 @@ ExecStart=/usr/bin/python3 /usr/local/bin/deepcool-lm-daemon
 Group=deepcool
 UMask=0007
 Restart=always
-RestartSec=3
+RestartSec=5
+# 给 USB 枚举一点时间（冷启动）
+ExecStartPre=/bin/sleep 2
 RuntimeDirectory=deepcool-lm
 RuntimeDirectoryMode=0755
 

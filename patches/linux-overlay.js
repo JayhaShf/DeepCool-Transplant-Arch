@@ -288,18 +288,23 @@
       return pushDataUrl(dataUrl);
     }
 
-    // 统一推帧入口（preset/preview/image 三路共用）：亮度遮罩、lastFrameDataUrl、
-    // 推送前模式复查、in-flight 防堆叠全部在此处理。
-    let frameBusy = false; // 上一帧未完成时跳过本 tick（daemon 慢时不并发堆积）
-    async function pushDataUrl(dataUrl, expectedMode) {
+    // 统一推帧入口。链路策略：
+    // - 应用侧降压：preset ~2s；静态 image/preview 只推一次（daemon 自己保活重发）
+    // - in-flight 跳过；相同 dataUrl 不重复打 socket，减轻 bulk 压力
+    // - daemon 侧只 frame_loop 写 USB，避免并发把固件打挂
+    const PRESET_PUSH_MS = 2000;
+    let frameBusy = false;
+    let lastPushedDataUrl = null;
+    async function pushDataUrl(dataUrl, expectedMode, force = false) {
       if (frameBusy) return false;
       frameBusy = true;
       try {
-        // 推屏前复查：期间 stopLoop/startLoop 切换了模式则放弃旧帧
         if (expectedMode !== undefined && (!active || currentMode !== expectedMode)) return false;
         lastFrameDataUrl = dataUrl;
+        if (!force && dataUrl && dataUrl === lastPushedDataUrl) return true;
         const result = await invoke('linux/push-image', dataUrl);
         if (!result || !result.ok) throw new Error((result && result.error) || '推送失败');
+        lastPushedDataUrl = dataUrl;
         return true;
       } finally {
         frameBusy = false;
@@ -325,10 +330,11 @@
       zenActive = false;
       active = true;
       currentMode = mode;
+      lastPushedDataUrl = null; // 强制下一帧上屏
       invoke('linux/hold-state', true).catch(() => {});
       pushFrame(mode);
-      // 推帧周期 1 秒（LCD 每秒刷新一次）
-      timer = setInterval(() => pushFrame(mode), 1000);
+      // 数字布局约 2s 刷新（传感器变化慢，且 daemon 会保活重发）
+      timer = setInterval(() => pushFrame(mode), PRESET_PUSH_MS);
     }
 
     function stopLoop() {
@@ -350,32 +356,31 @@
         invoke('linux/capture-image', { x: r.x, y: r.y, width: r.width, height: r.height }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('capture timeout')), 4000)),
       ]);
-      // 若 await 期间已有循环激活（如用户保存预设），则放弃本次预览。
       if (active) return;
       stopLoop();
       active = true;
       currentMode = 'preview';
+      lastPushedDataUrl = null;
       invoke('linux/hold-state', true).catch(() => {});
-      const push = () => pushDataUrl(dataUrl, 'preview');
-      const firstOk = await push();
-      // 复查模式后再建 interval：await 期间若被 startLoop 接管，不建空转 timer
+      // 预览静帧：只推一次，daemon 缓存后自行重发保活（避免每秒整图 base64）
+      const firstOk = await pushDataUrl(dataUrl, 'preview', true);
       if (!firstOk || !active || currentMode !== 'preview') return;
-      timer = setInterval(push, 1000);
       } finally {
         previewStarting = false;
       }
     }
 
-    // 上传图片/编辑图片后：持续显示该图片
+    // 上传图片/编辑图片后：推一次，由 daemon 保活重发
     function startImageLoop(dataUrl) {
       stopLoop();
       zenActive = false;
       active = true;
       currentMode = 'image';
+      lastPushedDataUrl = null;
       invoke('linux/hold-state', true).catch(() => {});
-      const push = () => pushDataUrl(dataUrl, 'image');
-      push();
-      timer = setInterval(push, 1000);
+      pushDataUrl(dataUrl, 'image', true).catch((error) => {
+        console.error('[DeepCool Linux] image push failed:', error);
+      });
     }
 
     // ---- 官方 L122 模式切换（反编译 index-8dc9d6df.js / index-c58f7fdf.js）----

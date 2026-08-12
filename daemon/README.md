@@ -55,10 +55,12 @@ psutil（使用率/频率/内存/磁盘网络速率差分）、nvidia-smi（GPU 
   init `aa 01 00 09 29 91`
 - 待机不使用硬件 zen 命令（`aa 04 00 03 00 00 00 dc 9b`）：toggle 是"切换"语义，
   关屏后恢复推帧不保证重新开屏（LCD 保持黑屏）；黑帧待机恢复推帧时自然点亮。
-- **连接时 USB reset**（`dev.reset()`，失败则 sysfs `authorized` 0→1）：
-  软重启后控制器固件有时卡在黑屏且仍接受 bulk 写，只有断电才亮；
-  daemon 每次打开设备先总线复位，避免必须拔电。
-- 推帧校验写入字节数，失败则 disconnect → 带 reset 重连。
+- **链路策略（减少“只能断电才亮”）**：
+  - **单写者**：`image` 请求只更新帧缓存；仅 `frame_loop` 写 USB
+  - **512B 分包** bulk 负载；校验写入长度
+  - **reset 节制**：启动可 reset 一次；之后仅写失败才 reset，且有冷却（90s）与每小时上限
+  - **应用降压**：overlay 数字布局 ~2s 一推；静态图只推一次，由 daemon 保活重发
+- 若设备已进入“bulk 成功但不刷新”的固件死锁，软件 reset **不一定**够，仍可能需断电 POR。
 - 以上命令来自 [daedlock/deepcool-lm](https://github.com/daedlock/deepcool-lm)
   （LM360 实测）；设备型号不同时帧头/命令可能需要调整
 
