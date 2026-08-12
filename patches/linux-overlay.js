@@ -378,6 +378,93 @@
       timer = setInterval(push, 1000);
     }
 
+    // ---- 官方 L122 模式切换（反编译 index-8dc9d6df.js / index-c58f7fdf.js）----
+    // 真实链路（不是 DOM 文本点击）：
+    //   el-select(modeChange 0=数字/1=多媒体)
+    //   → changeMode() → detailStore.setDeviceInfo()
+    //   → api.L122.updateDisplay(GlobalSetting, serial)
+    //   → ipc "l122/modelConfigurationSet"
+    // 禅/亮度/推荐组合同走 setDeviceInfo → modelConfigurationSet。
+    // 因此 LCD 桥只应听 modelConfigurationSet，按字段差分决定行为；
+    // 旧版「点中文文案嗅探」与官方 el-select 不符，会误触发/互相打架。
+    let lastModeChange = null;
+    let lastAppliedConfig = null; // 上一次已处理的 GlobalSetting（差分用）
+
+    function digitalDataKey(data) {
+      if (!data || typeof data !== 'object') return '';
+      return [data.mainData, data.subData1, data.subData2, data.orientation].join('|');
+    }
+
+    // 按 modeChange 推 LCD：0 数字布局；1 多媒体（有帧则 image，否则 preset 占位）
+    function applyDisplayMode(cfg, reason) {
+      const mc = Number(cfg && cfg.modeChange) || 0;
+      lastModeChange = mc;
+      if (presetConfig) presetConfig.modeChange = mc;
+      console.log('[DeepCool Linux] applyDisplayMode', mc, reason || '', 'currentMode=', currentMode);
+      if (zenActive) {
+        zenActive = false;
+        invoke('linux/hold-state', false).catch(() => {});
+      }
+      if (mc === 1 && lastFrameDataUrl) {
+        startImageLoop(lastFrameDataUrl);
+      } else {
+        startLoop('preset');
+      }
+      syncZenButton();
+    }
+
+    function handleModelConfigurationSet(cfg) {
+      if (!cfg || typeof cfg !== 'object') return;
+      const prev = lastAppliedConfig || presetConfig || {};
+      const prevZen = Boolean(prev.zenMode);
+      const nextZen = Boolean(cfg.zenMode);
+      const modeChanged = Number(prev.modeChange) !== Number(cfg.modeChange);
+      const brightnessChanged = Number(prev.brightnessControl) !== Number(cfg.brightnessControl);
+      const digitalChanged = digitalDataKey(prev.digitalData) !== digitalDataKey(cfg.digitalData);
+
+      presetConfig = cfg;
+      lastAppliedConfig = {
+        zenMode: cfg.zenMode,
+        mandatoryZenMode: cfg.mandatoryZenMode,
+        modeChange: cfg.modeChange,
+        brightnessControl: cfg.brightnessControl,
+        digitalData: cfg.digitalData ? { ...cfg.digitalData } : null,
+      };
+      if (cfg.brightnessControl !== undefined) lastBrightness = cfg.brightnessControl;
+
+      // 优先处理 modeChange：官方 el-select 只改 modeChange 再 setDeviceInfo，
+      // 但 GlobalSetting.zenMode 可能仍为 true（store 残留）。若先判 zen 会误进待机，
+      // 数字/多媒体无法互切。模式切换 = 用户要看该模式画面，强制退出待机推帧。
+      if (modeChanged) {
+        applyDisplayMode(cfg, 'modeChange');
+        return;
+      }
+      // 用户打开禅状态（mode 未变）→ 黑帧待机
+      if (nextZen && !prevZen) {
+        lastModeChange = Number(cfg.modeChange) || 0;
+        enterZen();
+        return;
+      }
+      // 用户关闭禅状态 → 按当前 modeChange 恢复推帧
+      if (!nextZen && prevZen) {
+        applyDisplayMode(cfg, 'zen-off');
+        return;
+      }
+      // 调整显示数据 / 亮度：非待机时刷新
+      if (!nextZen && (digitalChanged || brightnessChanged)) {
+        applyDisplayMode(cfg, digitalChanged ? 'digitalData' : 'brightness');
+        return;
+      }
+      // 禅已开且未改模式：保持待机
+      if (nextZen) {
+        lastModeChange = Number(cfg.modeChange) || 0;
+        if (!zenActive) enterZen();
+        return;
+      }
+      // 其它 set：确保按 mode 推帧
+      applyDisplayMode(cfg, 'config-set');
+    }
+
     // 统一渲染：软件预览（l122/image-transmission）直接显示最近推送到 LCD 的
     // 同一张图，不再由 main 进程生成第二套画面。
     window.ipcRenderer.invoke = async function (channel, ...args) {
@@ -401,94 +488,37 @@
       const result = await invoke(channel, ...args);
       if (channel === 'l122/modelConfigurationSearch' && result && result.data) {
         presetConfig = result.data;
+        lastAppliedConfig = {
+          zenMode: result.data.zenMode,
+          mandatoryZenMode: result.data.mandatoryZenMode,
+          modeChange: result.data.modeChange,
+          brightnessControl: result.data.brightnessControl,
+          digitalData: result.data.digitalData ? { ...result.data.digitalData } : null,
+        };
+        lastModeChange = Number(result.data.modeChange) || 0;
         if (result.data.brightnessControl !== undefined) lastBrightness = result.data.brightnessControl;
       }
       if (channel === 'l122/modelConfigurationSet') {
+        // 用调用参数（GlobalSetting），不依赖官方 native 写配置是否成功
         const cfg = args[0] || presetConfig;
-        presetConfig = cfg;
-        if (cfg && cfg.brightnessControl !== undefined) lastBrightness = cfg.brightnessControl;
-        // 官方"禅状态"开关 → 待机；关闭则按 modeChange 恢复推帧。
-        // 注意：切换数字/多媒体模式也会触发 modelConfigurationSet，且携带的
-        // GlobalSetting.zenMode 可能残留 true（官方 store 持久化）——若刚发生过
-        // 模式切换（applyModeChange），忽略该残留，避免"切模式就黑屏"。
-        const justSwitchedMode = Date.now() - lastModeSwitchAt < 1500;
-        if (cfg && cfg.zenMode === true && !justSwitchedMode) {
-          lastModeChange = cfg ? Number(cfg.modeChange) : 0;
-          enterZen();
-        } else {
-          // 统一走 applyModeChange：纠正 image/preview 下配置值未变导致无法回数字模式
-          applyModeChange(cfg ? Number(cfg.modeChange) || 0 : 0, true);
-          syncZenButton();
-        }
-        // 持久化，重启后自动恢复
+        handleModelConfigurationSet(cfg);
         invoke('linux/preset-save', cfg).catch(() => {});
       }
       // 上传/编辑图片成功：显示该图片（软件预览与 LCD 同一张）
+      // 不改 modeChange（官方多媒体模式仍由 el-select 决定）；数字模式下也可预览上传图，
+      // 再切回数字模式时 handleModelConfigurationSet(modeChanged/applyDisplayMode) 会恢复 preset。
       if ((channel === 'l122/uploadSelectedMedia' || channel === 'l122/modifyMedia') && result && result.code === 0 && result.data && result.data.frameDataUrl) {
         startImageLoop(result.data.frameDataUrl);
       }
       return result;
     };
 
-    // 检测官方"数字模式/多媒体模式"切换：官方切换是纯前端点击（不触发
-    // modelConfigurationSet），在捕获阶段监听点击，命中"数字模式/多媒体模式"
-    // 文本时更新 presetConfig.modeChange 并同步 LCD 显示模式。
-    let lastModeChange = null;
-    let lastModeSwitchAt = 0; // 最近一次模式切换时间（modelConfigurationSet 判断用）
-    function applyModeChange(mc, force = false) {
-      // 目标推帧形态：数字=preset；多媒体=有图则 image，否则先 preset 占位。
-      // 注意：上传图片会 startImageLoop 但不改 lastModeChange——此时 lastModeChange
-      // 仍可能是 0，若仅用 mc===lastModeChange 短路，再点「数字模式」会直接 return，
-      // LCD 卡在 image/preview。必须结合 currentMode/active/zen 判断是否已到位。
-      const wantImage = mc === 1 && !!lastFrameDataUrl;
-      const alreadyOnTarget = !zenActive && active && (
-        (wantImage && currentMode === 'image') ||
-        (!wantImage && mc === 0 && currentMode === 'preset') ||
-        (mc === 1 && !lastFrameDataUrl && currentMode === 'preset')
-      );
-      if (!force && mc === lastModeChange && alreadyOnTarget) return;
-      lastModeChange = mc;
-      lastModeSwitchAt = Date.now();
-      if (presetConfig) presetConfig.modeChange = mc;
-      console.log('[DeepCool Linux] modeChange:', mc, 'force=', force, 'currentMode=', currentMode);
-      // 待机中切换模式：用户主动操作个性化设置 = 想看效果，自动退出待机
-      // （同步清标志 + 放行 hold），再应用新模式；官方禅状态开关显示由
-      // modelConfigurationSet 下次保存时同步。
-      if (zenActive) {
-        zenActive = false;
-        invoke('linux/hold-state', false).catch(() => {});
-        syncZenButton();
-      }
-      if (wantImage) {
-        startImageLoop(lastFrameDataUrl);
-      } else {
-        // 数字模式，或多媒体但尚无可用帧：走官方数字布局推帧
-        startLoop('preset');
-      }
-    }
-    document.addEventListener('click', (event) => {
-      // 向上多看几层：官方下拉项可能是 span 包在 div 里，或 text 含空白/子节点。
-      let node = event.target;
-      for (let depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
-        if (!node.getAttribute && !node.textContent) continue;
-        const text = String(node.textContent || '').replace(/\s+/g, ' ').trim();
-        // 只匹配短标签，避免点到整页容器误触发
-        if (text === '多媒体模式' || text === 'Multimedia Mode' || text === 'Multimedia') {
-          applyModeChange(1, true);
-          return;
-        }
-        if (text === '数字模式' || text === 'Digital Mode' || text === 'Digital') {
-          applyModeChange(0, true);
-          return;
-        }
-      }
-    }, true); // 捕获阶段：先于官方 Vue handler
-
     // 推送预览集成到软件：进入 LM-Series 页面后自动把页面预览截图推送到 LCD
     // （立即生效，无需任何按钮）；离开页面或激活预设/图片后自动停止/让位。
     function ensureAutoPreview() {
       const inL122 = location.hash.includes('/devices/L122/');
       if (zenActive) return; // 待机状态：保持 LCD 关闭，不自动预览
+      // 数字/多媒体推帧已占用时不要抢成 preview
       if (inL122) {
         if (!active && !previewStarting) pushPreviewLoop().catch(() => {});
       } else if (currentMode === 'preview') {
@@ -501,14 +531,15 @@
         const saved = await invoke('linux/preset-load');
         if (saved && saved.digitalData && !active && !zenActive) {
           presetConfig = saved;
+          lastAppliedConfig = {
+            zenMode: saved.zenMode,
+            mandatoryZenMode: saved.mandatoryZenMode,
+            modeChange: saved.modeChange,
+            brightnessControl: saved.brightnessControl,
+            digitalData: saved.digitalData ? { ...saved.digitalData } : null,
+          };
           if (saved.brightnessControl !== undefined) lastBrightness = saved.brightnessControl;
-          lastModeChange = Number(saved.modeChange); // 恢复模式基线
-          // 多媒体模式恢复图片显示；数字模式恢复预设推帧
-          if (saved.modeChange === 1 && lastFrameDataUrl) {
-            startImageLoop(lastFrameDataUrl);
-          } else {
-            startLoop('preset');
-          }
+          applyDisplayMode(saved, 'restore');
           console.log('[DeepCool Linux] restored preset:', saved.digitalData, 'modeChange:', saved.modeChange);
         }
       } catch (error) {
