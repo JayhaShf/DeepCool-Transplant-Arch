@@ -220,12 +220,13 @@ sudo bash scripts/reinstall-daemon.sh
 `install-daemon.sh` 会安装依赖（python-pyusb/python-psutil/python-pillow）、
 创建 `deepcool` 组并把安装用户加入该组、安装 systemd unit、启用启动
 `deepcool-lm-daemon.service`（root 运行、`Group=deepcool`、自动重启，
-socket **0660 root:deepcool**，双实例保护）。组权限需重新登录或
-`newgrp deepcool` 后生效。详见 `daemon/README.md`。
+socket **0660 root:deepcool** + 用户 ACL，双实例保护）。加组后若不注销，
+`id` 可能仍无 deepcool（正常）；ACL 按 UID 授权，无需重登即可推帧。
+详见 `daemon/README.md`。
 
 ### daemon 协议摘要
 
-Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 root:deepcool），JSON 请求：
+Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 + ACL），JSON 请求：
 
 | 动作 | 参数 | 说明 |
 |---|---|---|
