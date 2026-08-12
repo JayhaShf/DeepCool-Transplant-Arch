@@ -75,22 +75,42 @@ class LMDevice:
     def __init__(self):
         self._dev = None
         self._lock = threading.Lock()
+        self._connect_generation = 0  # 每次成功 connect +1（便于日志）
 
     @property
     def connected(self):
         return self._dev is not None
 
-    def connect(self):
+    def connect(self, force_reset=True):
+        """打开设备。force_reset=True（默认）先 USB reset：
+        软重启后控制器固件常卡在黑屏/忽略帧，软件 push 成功但屏不亮；
+        只有断电才恢复。root daemon 上 dev.reset() 等价总线复位，多数情况可免断电。"""
         try:
             import usb.core
             import usb.util
         except ImportError:
             log("pyusb 未安装（sudo pacman -S python-pyusb）")
             return False
+        self.disconnect()
         try:
             dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
             if dev is None:
                 return False
+            if force_reset:
+                try:
+                    # reset 后设备会短暂消失，需重新 find
+                    dev.reset()
+                    log("USB reset 已发送，等待重枚举…")
+                    time.sleep(1.2)
+                except Exception as exc:
+                    log("USB reset 失败（继续尝试 claim）:", exc)
+                    # 兜底：sysfs authorized 掉电重枚举
+                    self._sysfs_reauth()
+                    time.sleep(1.0)
+                dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
+                if dev is None:
+                    log("USB reset 后设备未重现")
+                    return False
             try:
                 if dev.is_kernel_driver_active(0):
                     dev.detach_kernel_driver(0)
@@ -98,17 +118,57 @@ class LMDevice:
                 pass
             try:
                 dev.set_configuration()
+            except Exception as exc:
+                # 已配置时部分设备会报错，忽略后仍 claim
+                log("set_configuration:", exc)
+            try:
                 usb.util.claim_interface(dev, 0)
-            except Exception:
-                pass
+            except Exception as exc:
+                log("claim_interface 失败:", exc)
+                return False
             self._dev = dev
-            log("USB 已连接")
-            self._raw_write(CMD_INIT_QUERY)
+            self._connect_generation += 1
+            log(f"USB 已连接 (gen={self._connect_generation})")
+            # 初始化查询 + 短暂等待，再由 frame_loop / image 推帧
+            n = self._raw_write(CMD_INIT_QUERY)
+            if n <= 0:
+                log("INIT_QUERY 写入失败，将在后续 frame_loop 中重试连接")
+                self.disconnect()
+                return False
             return True
         except Exception as exc:
             self._dev = None
             log("USB 连接失败:", exc)
             return False
+
+    @staticmethod
+    def _sysfs_reauth():
+        """通过 sysfs authorized 0→1 强制 USB 重枚举（reset 失败时）。"""
+        try:
+            base = "/sys/bus/usb/devices"
+            for name in os.listdir(base):
+                d = os.path.join(base, name)
+                try:
+                    with open(os.path.join(d, "idVendor")) as fh:
+                        if fh.read().strip().lower() != f"{VENDOR_ID:04x}":
+                            continue
+                    with open(os.path.join(d, "idProduct")) as fh:
+                        if fh.read().strip().lower() != f"{PRODUCT_ID:04x}":
+                            continue
+                except OSError:
+                    continue
+                auth = os.path.join(d, "authorized")
+                if not os.path.exists(auth):
+                    continue
+                log("sysfs reauth:", d)
+                with open(auth, "w") as fh:
+                    fh.write("0\n")
+                time.sleep(0.4)
+                with open(auth, "w") as fh:
+                    fh.write("1\n")
+                return
+        except Exception as exc:
+            log("sysfs reauth 失败:", exc)
 
     def disconnect(self):
         dev, self._dev = self._dev, None
@@ -137,12 +197,24 @@ class LMDevice:
             return self._raw_write(data)
 
     def send_frame(self, framebuffer):
-        """帧头 + 负载在同一把锁内连续发送：
-        分两次 write（各拿一次锁）会让并发 brightness/其他帧插在两者之间，
-        设备收到坏帧。"""
+        """帧头 + 负载在同一把锁内连续发送。
+        任一段写入失败返回 False，并 disconnect 触发重连（含 USB reset）。"""
+        expect_fb = WIDTH * HEIGHT * 2
+        if framebuffer is None or len(framebuffer) != expect_fb:
+            log(f"send_frame: 非法帧长度 {0 if framebuffer is None else len(framebuffer)}（期望 {expect_fb}）")
+            return False
         with self._lock:
-            self._raw_write(FRAME_HEADER)
-            self._raw_write(framebuffer)
+            n1 = self._raw_write(FRAME_HEADER)
+            if n1 != len(FRAME_HEADER):
+                log(f"send_frame: 帧头写入异常 n={n1}")
+                self.disconnect()
+                return False
+            n2 = self._raw_write(framebuffer)
+            if n2 != expect_fb:
+                log(f"send_frame: 负载写入异常 n={n2}")
+                self.disconnect()
+                return False
+            return True
 
     def brightness_up(self):
         self.write(CMD_BRIGHTNESS_UP)
@@ -396,7 +468,10 @@ class Daemon:
             except Exception as exc:
                 return {"ok": False, "mode": self.mode(), "error": f"image 解码失败: {exc}"}
             self.set_mode("image", fb)
-            self.device.send_frame(fb)
+            # 立即推一帧；失败则 disconnect，由 usb_loop reset 后 frame_loop 重发
+            if not self.device.send_frame(fb):
+                log("image 首帧写入失败，将重连 USB")
+                self.device.disconnect()
             return {"ok": True, "mode": "image"}
         if action == "brightness":
             direction = request.get("direction") or "up"
@@ -411,10 +486,11 @@ class Daemon:
     # ---- 后台线程 ----
 
     def usb_loop(self):
-        """连接 USB（设备可能晚出现，重试），掉线自动重连。"""
+        """连接 USB（设备可能晚出现，重试），掉线自动重连。
+        每次 connect 默认 USB reset，避免软重启后固件卡死需断电。"""
         while self._running:
             if not self.device.connected:
-                if not self.device.connect():
+                if not self.device.connect(force_reset=True):
                     time.sleep(3)
                     continue
             time.sleep(2)
@@ -422,17 +498,27 @@ class Daemon:
     def frame_loop(self):
         """按当前模式持续重发帧：monitor/zen 黑屏保持，image 最后帧。
         黑帧待机：保持 LCD 显示黑色（视觉待机），不依赖硬件 zen toggle，
-        恢复推帧时 LCD 自然点亮。"""
+        恢复推帧时 LCD 自然点亮。
+        写帧失败 → disconnect → usb_loop 带 reset 重连。"""
+        fail_streak = 0
         while self._running:
             if self.device.connected:
                 mode = self.mode()
                 if mode == "image":
                     with self._state_lock:
                         fb = self._frame
-                    if fb is not None:
-                        self.device.send_frame(fb)
+                    ok = fb is not None and self.device.send_frame(fb)
                 else:  # monitor / zen：黑屏
-                    self.device.send_frame(black_framebuffer())
+                    ok = self.device.send_frame(black_framebuffer())
+                if ok:
+                    fail_streak = 0
+                else:
+                    fail_streak += 1
+                    log(f"推帧失败 streak={fail_streak}，断开以触发 USB reset 重连")
+                    self.device.disconnect()
+                    # 连续失败时多等一会，避免 reset 风暴
+                    time.sleep(min(2.0 + fail_streak, 8.0))
+                    continue
             time.sleep(FRAME_INTERVAL)
 
     def sample_loop(self):
