@@ -269,34 +269,58 @@
     }
 
 
-    // 官方亮度滑块是软遮罩：opacity = 1 - (brightness + 70) / 170
-    // （brightness=0 最暗，=100 最亮）。推屏前应用到画布，LCD 与软件预览一致。
-    function applyBrightness(canvas) {
-      if (lastBrightness === null || lastBrightness === undefined) return;
+    // 官方（index-8dc9d6df.js rightDisplay / L122Canvas）：
+    // - 数字 canvas 重绘 1000ms（setInterval 1e3）
+    // - 亮度软遮罩 opacity = 1 - (brightness+70)/170（非纯黑）
+    // - 禅：mandatory+zen → 强制禅 UI、禁止操作；仅 zen → 降同步频率，
+    //   且 showZenCanvas 仅在 cpuUsage>=85 时成立（低负载仍显示正常画面）
+    // - 媒体 switchTime 默认 3000ms
+    // Linux 桥对齐：强制禅 → daemon 黑帧；可选禅 → 仍推内容但降频，高负载再加深遮罩。
+    function applyBrightness(canvas, extraDim = 0) {
+      if (lastBrightness === null || lastBrightness === undefined) {
+        if (!(extraDim > 0)) return;
+      }
       const b = Number(lastBrightness);
-      if (!Number.isFinite(b)) return;
-      const opacity = Math.max(0, Math.min(1, 1 - (b + 70) / 170));
+      let opacity = 0;
+      if (Number.isFinite(b)) {
+        opacity = Math.max(0, Math.min(1, 1 - (b + 70) / 170));
+      }
+      // 可选禅 + 高负载：再叠一层（官方切到 ZEN 画布；我们加深而不关 USB 内容流）
+      if (extraDim > 0) opacity = Math.min(0.92, opacity + extraDim);
       if (opacity <= 0) return;
       const ctx = canvas.getContext('2d');
       ctx.fillStyle = `rgba(0,0,0,${opacity.toFixed(4)})`;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
 
-    async function pushCanvas(canvas) {
-      applyBrightness(canvas);
+    async function pushCanvas(canvas, extraDim = 0) {
+      applyBrightness(canvas, extraDim);
       const dataUrl = canvas.toDataURL('image/png');
       return pushDataUrl(dataUrl);
     }
 
-    // 统一推帧入口。链路策略：
-    // - 应用侧降压：preset ~2s；静态 image/preview 只推一次（daemon 自己保活重发）
-    // - in-flight 跳过；相同 dataUrl 不重复打 socket，减轻 bulk 压力
-    // - daemon 侧只 frame_loop 写 USB，避免并发把固件打挂
-    const PRESET_PUSH_MS = 2000;
+    // 推帧节奏对齐官方：正常数字 1s；可选禅降频（文案「降低同步频率」）
+    const PRESET_PUSH_MS_NORMAL = 1000;
+    const PRESET_PUSH_MS_OPTIONAL_ZEN = 5000;
+    const OPTIONAL_ZEN_CPU = 85;
     let frameBusy = false;
     let lastPushedDataUrl = null;
+    let optionalZenActive = false; // GlobalSetting.zenMode && !mandatoryZenMode
+
+    function isMandatoryZen(cfg) {
+      return Boolean(cfg && cfg.zenMode && cfg.mandatoryZenMode);
+    }
+    function isOptionalZen(cfg) {
+      return Boolean(cfg && cfg.zenMode && !cfg.mandatoryZenMode);
+    }
+    function presetIntervalMs() {
+      return optionalZenActive ? PRESET_PUSH_MS_OPTIONAL_ZEN : PRESET_PUSH_MS_NORMAL;
+    }
+
     async function pushDataUrl(dataUrl, expectedMode, force = false) {
       if (frameBusy) return false;
+      // 强制禅 / 浮层待机：禁止任何推帧，避免把黑帧冲掉或并发写 USB
+      if (zenActive && !force) return false;
       frameBusy = true;
       try {
         if (expectedMode !== undefined && (!active || currentMode !== expectedMode)) return false;
@@ -313,13 +337,19 @@
 
     async function pushFrame(mode) {
       try {
-        if (frameBusy) return;
+        if (frameBusy || zenActive) return;
         await ensureFontsReady();
         const status = await invoke('linux/status');
-        if (!active || currentMode !== mode) return;
+        if (!active || currentMode !== mode || zenActive) return;
         const canvas = drawPreset(presetConfig, status);
-        if (!active || currentMode !== mode) return;
-        await pushCanvas(canvas);
+        if (!active || currentMode !== mode || zenActive) return;
+        // 可选禅 + CPU>=85：官方 showZenCanvas，LCD 侧加深遮罩模拟禅屏
+        let extraDim = 0;
+        if (optionalZenActive) {
+          const cpu = Number(status && status.snapshot && status.snapshot.cpu_usage);
+          if (Number.isFinite(cpu) && cpu >= OPTIONAL_ZEN_CPU) extraDim = 0.45;
+        }
+        await pushCanvas(canvas, extraDim);
       } catch (error) {
         console.error('[DeepCool Linux] frame push failed:', error);
       }
@@ -333,8 +363,8 @@
       lastPushedDataUrl = null; // 强制下一帧上屏
       invoke('linux/hold-state', true).catch(() => {});
       pushFrame(mode);
-      // 数字布局约 2s 刷新（传感器变化慢，且 daemon 会保活重发）
-      timer = setInterval(() => pushFrame(mode), PRESET_PUSH_MS);
+      // 官方数字 canvas 1s；可选禅时 5s（降低同步频率）
+      timer = setInterval(() => pushFrame(mode), presetIntervalMs());
     }
 
     function stopLoop() {
@@ -371,7 +401,12 @@
     }
 
     // 上传图片/编辑图片后：推一次，由 daemon 保活重发
+    // 官方强制禅时禁止对显示屏操作 → 忽略上传上屏
     function startImageLoop(dataUrl) {
+      if (zenActive || isMandatoryZen(presetConfig)) {
+        console.log('[DeepCool Linux] skip image loop (mandatory zen / standby)');
+        return;
+      }
       stopLoop();
       zenActive = false;
       active = true;
@@ -401,15 +436,27 @@
     }
 
     // 按 modeChange 推 LCD：0 数字布局；1 多媒体（有帧则 image，否则 preset 占位）
+    // 对齐官方：强制禅不在此推内容；可选禅仍推内容（降频）。
     function applyDisplayMode(cfg, reason) {
       const mc = Number(cfg && cfg.modeChange) || 0;
       lastModeChange = mc;
       if (presetConfig) presetConfig.modeChange = mc;
-      console.log('[DeepCool Linux] applyDisplayMode', mc, reason || '', 'currentMode=', currentMode);
+      optionalZenActive = isOptionalZen(cfg);
+      console.log('[DeepCool Linux] applyDisplayMode', mc, reason || '',
+        'mandatoryZen=', isMandatoryZen(cfg), 'optionalZen=', optionalZenActive);
+
+      // 强制禅（官方 isZenStrict）：黑帧 + 禁止操作区语义 → 我们停内容推流
+      if (isMandatoryZen(cfg)) {
+        enterZen({ mandatory: true });
+        return;
+      }
+
+      // 退出强制禅 / 浮层待机后恢复内容（后续 startLoop/startImageLoop 会把 daemon 切到 image）
       if (zenActive) {
         zenActive = false;
         invoke('linux/hold-state', false).catch(() => {});
       }
+
       if (mc === 1 && lastFrameDataUrl) {
         startImageLoop(lastFrameDataUrl);
       } else {
@@ -421,11 +468,16 @@
     function handleModelConfigurationSet(cfg) {
       if (!cfg || typeof cfg !== 'object') return;
       const prev = lastAppliedConfig || presetConfig || {};
-      const prevZen = Boolean(prev.zenMode);
-      const nextZen = Boolean(cfg.zenMode);
+      const prevMandatory = isMandatoryZen(prev);
+      const nextMandatory = isMandatoryZen(cfg);
+      const prevOptional = isOptionalZen(prev);
+      const nextOptional = isOptionalZen(cfg);
       const modeChanged = Number(prev.modeChange) !== Number(cfg.modeChange);
       const brightnessChanged = Number(prev.brightnessControl) !== Number(cfg.brightnessControl);
       const digitalChanged = digitalDataKey(prev.digitalData) !== digitalDataKey(cfg.digitalData);
+      const zenFlagsChanged = prevMandatory !== nextMandatory || prevOptional !== nextOptional
+        || Boolean(prev.zenMode) !== Boolean(cfg.zenMode)
+        || Boolean(prev.mandatoryZenMode) !== Boolean(cfg.mandatoryZenMode);
 
       presetConfig = cfg;
       lastAppliedConfig = {
@@ -436,37 +488,36 @@
         digitalData: cfg.digitalData ? { ...cfg.digitalData } : null,
       };
       if (cfg.brightnessControl !== undefined) lastBrightness = cfg.brightnessControl;
+      optionalZenActive = nextOptional;
 
-      // 优先处理 modeChange：官方 el-select 只改 modeChange 再 setDeviceInfo，
-      // 但 GlobalSetting.zenMode 可能仍为 true（store 残留）。若先判 zen 会误进待机，
-      // 数字/多媒体无法互切。模式切换 = 用户要看该模式画面，强制退出待机推帧。
+      // 1) 模式切换优先（官方 el-select → setDeviceInfo；store 可能残留 zenMode）
+      //    官方：强制禅时 UI 有 overlay 禁止操作；若用户仍能改 mode，我们按 mode 退出强制禅
       if (modeChanged) {
         applyDisplayMode(cfg, 'modeChange');
         return;
       }
-      // 用户打开禅状态（mode 未变）→ 黑帧待机
-      if (nextZen && !prevZen) {
+      // 2) 禅相关标志变化
+      if (zenFlagsChanged) {
+        if (nextMandatory) {
+          enterZen({ mandatory: true });
+          return;
+        }
+        // 可选禅 或 关闭禅：都走内容推流（可选禅仅降频）
+        applyDisplayMode(cfg, nextOptional ? 'optional-zen' : 'zen-off');
+        return;
+      }
+      // 3) 强制禅保持：不因亮度/数据改动推内容（官方 mandatoryZenModeEx）
+      if (nextMandatory) {
         lastModeChange = Number(cfg.modeChange) || 0;
-        enterZen();
+        if (!zenActive) enterZen({ mandatory: true });
         return;
       }
-      // 用户关闭禅状态 → 按当前 modeChange 恢复推帧
-      if (!nextZen && prevZen) {
-        applyDisplayMode(cfg, 'zen-off');
-        return;
-      }
-      // 调整显示数据 / 亮度：非待机时刷新
-      if (!nextZen && (digitalChanged || brightnessChanged)) {
+      // 4) 数据/亮度：刷新当前模式（可选禅下也刷新，仅 interval 不同）
+      if (digitalChanged || brightnessChanged) {
         applyDisplayMode(cfg, digitalChanged ? 'digitalData' : 'brightness');
         return;
       }
-      // 禅已开且未改模式：保持待机
-      if (nextZen) {
-        lastModeChange = Number(cfg.modeChange) || 0;
-        if (!zenActive) enterZen();
-        return;
-      }
-      // 其它 set：确保按 mode 推帧
+      // 5) 其它 set
       applyDisplayMode(cfg, 'config-set');
     }
 
@@ -518,12 +569,10 @@
       return result;
     };
 
-    // 推送预览集成到软件：进入 LM-Series 页面后自动把页面预览截图推送到 LCD
-    // （立即生效，无需任何按钮）；离开页面或激活预设/图片后自动停止/让位。
+    // 推送预览：仅在未主动推帧、非强制禅时补一帧页面预览（避免抢占数字/多媒体流）
     function ensureAutoPreview() {
       const inL122 = location.hash.includes('/devices/L122/');
-      if (zenActive) return; // 待机状态：保持 LCD 关闭，不自动预览
-      // 数字/多媒体推帧已占用时不要抢成 preview
+      if (zenActive || isMandatoryZen(presetConfig)) return;
       if (inL122) {
         if (!active && !previewStarting) pushPreviewLoop().catch(() => {});
       } else if (currentMode === 'preview') {
@@ -544,8 +593,11 @@
             digitalData: saved.digitalData ? { ...saved.digitalData } : null,
           };
           if (saved.brightnessControl !== undefined) lastBrightness = saved.brightnessControl;
+          optionalZenActive = isOptionalZen(saved);
+          // 强制禅恢复为黑帧待机；可选禅/正常 → 推内容
           applyDisplayMode(saved, 'restore');
-          console.log('[DeepCool Linux] restored preset:', saved.digitalData, 'modeChange:', saved.modeChange);
+          console.log('[DeepCool Linux] restored preset:', saved.digitalData,
+            'modeChange:', saved.modeChange, 'zen:', saved.zenMode, 'mandatory:', saved.mandatoryZenMode);
         }
       } catch (error) {
         console.error('[DeepCool Linux] restore preset failed:', error);
@@ -625,23 +677,26 @@
       }
     }
 
-    // 进入待机（Zen）：停推帧 + 置标志 + 通知 daemon。官方"禅状态"开关与
-    // 浮层"待机"按钮共用此逻辑。
-    async function enterZen() {
+    // 进入强制禅 / 浮层待机：停内容推流 + daemon 黑帧。
+    // 官方：mandatoryZenMode+zenMode → isZenStrict，显示 ZEN MODE 且禁止操作。
+    // 可选禅（仅 zenMode）不走这里，见 applyDisplayMode 降频推内容。
+    async function enterZen(_opts) {
       stopLoop();
       zenActive = true;
-      // 待机期间保持 hold，防止状态轮询把 daemon 切回 monitor。
+      optionalZenActive = false;
       await invoke('linux/hold-state', true).catch(() => {});
       await invoke('linux/daemon-command', { action: 'zen' }).catch(() => {});
       syncZenButton();
     }
 
-    // 退出待机：恢复推帧（预设/最近画面）。浮层"待机"按钮再点一次触发；
-    // 官方"禅状态"开关关闭时由 modelConfigurationSet(zenMode:false) 走 startLoop。
+    // 退出待机：按当前配置恢复（含可选禅降频）
     async function exitZen() {
       zenActive = false;
       await invoke('linux/hold-state', false).catch(() => {});
-      if (presetConfig && presetConfig.modeChange === 1 && lastFrameDataUrl) {
+      if (presetConfig) {
+        // 若配置仍是强制禅，exit 只清浮层标志，仍按配置 apply
+        applyDisplayMode(presetConfig, 'exitZen');
+      } else if (lastFrameDataUrl) {
         startImageLoop(lastFrameDataUrl);
       } else {
         startLoop('preset');
