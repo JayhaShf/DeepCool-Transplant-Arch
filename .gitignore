@@ -13,6 +13,9 @@ __pycache__/
 *.log
 .DS_Store
 
+# 发布产物
+dist/
+
 # 运行时状态
 *.pem
 .zcode/

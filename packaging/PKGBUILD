@@ -1,0 +1,130 @@
+# Maintainer: Jay <jay@localhost>
+# 构建前需在 packaging/ 或与 PKGBUILD 同目录放置：
+#   - deepcool-linux-port-0.1.0-source.tar.zst （由 packaging/build-release.sh 产出）
+#   - DeepCool-1.2.12-setup.exe                （官方安装包，构建方自备）
+# 包内含 DeepCool 官方素材，分发前请自行评估版权（见 packaging/README.md）。
+pkgname=deepcool-linux-port
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Arch Linux port of DeepCool 1.2.12: official Electron UI + Linux sensors + LM-Series LCD daemon"
+arch=('x86_64')
+url="https://github.com/JayhaShf/DeepCool-Transplant-Arch"
+license=('custom')
+depends=(
+  'python-pyusb'
+  'python-psutil'
+  'python-pillow'
+  'acl'
+  'ffmpeg'
+  'bash'
+  'curl'
+)
+makedepends=(
+  'nodejs'
+  'npm'
+  '7zip'
+  'zstd'
+)
+source=(
+  "deepcool-linux-port-${pkgver}-source.tar.zst"
+  'DeepCool-1.2.12-setup.exe'
+)
+sha256sums=('SKIP' 'SKIP')
+
+# 解包 exe + 打补丁，产出可运行的应用树
+build() {
+  cd "$srcdir"
+  # 取 Linux Electron（electron@23.3.13 在 devDependencies；含 asar 工具）
+  npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+  # 解包官方安装包 → app-payload
+  SETUP="$srcdir/DeepCool-1.2.12-setup.exe" \
+  APP_DIR="$srcdir/app-payload" \
+  bash scripts/extract.sh
+  # 应用 Linux 补丁（stubs / IPC 桥 / overlay / 字节码 loader）
+  bash scripts/prepare.sh "$srcdir/app-payload"
+  # 最小化：剔除非运行所需（与 build-release.sh 一致）
+  find "$srcdir/app-payload/resources/app.asar.extracted" -name '*.orig' -delete
+  rm -f "$srcdir/app-payload/resources/app.asar" \
+        "$srcdir/app-payload/resources/app-update.yml" \
+        "$srcdir/app-payload/resources/elevate.exe"
+  rm -rf "$srcdir/app-payload/resources/app.asar.unpacked" \
+         "$srcdir/app-payload/resources/VCRuntime" \
+         "$srcdir/app-payload/resources/service" \
+         "$srcdir/app-payload/resources/media"
+  rm -rf "$srcdir/app-payload/DeepCool.exe" \
+         "$srcdir/app-payload"/*.dll "$srcdir/app-payload/locales" \
+         "$srcdir/app-payload"/*.pak "$srcdir/app-payload"/*.dat \
+         "$srcdir/app-payload/LICENSE.electron.txt" 2>/dev/null || true
+}
+
+package() {
+  local PREFIX="/opt/$pkgname"
+  install -d "$pkgdir$PREFIX"
+  cp -a "$srcdir/app-payload" "$pkgdir$PREFIX/app"
+  cp -a "$srcdir/node_modules/electron/dist" "$pkgdir$PREFIX/electron"
+  install -d "$pkgdir$PREFIX/scripts" "$pkgdir$PREFIX/bin"
+  cp "$srcdir"/scripts/{run.sh,verify.sh,prepare.sh,install-user.sh,install-autostart.sh,uninstall-user.sh,uninstall-autostart.sh} \
+     "$pkgdir$PREFIX/scripts/"
+  cp -a "$srcdir"/{patches,daemon,tools} "$pkgdir$PREFIX/"
+  cp "$srcdir/README.md" "$pkgdir$PREFIX/"
+
+  # 启动器：环境指向 /opt 布局
+  cat > "$pkgdir$PREFIX/bin/deepcool-linux-port" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+PREFIX="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+export DEEPCOOL_APP_DIR="$PREFIX/app"
+export DEEPCOOL_ELECTRON="$PREFIX/electron/electron"
+exec "$PREFIX/scripts/run.sh" "$@"
+EOF
+  chmod +x "$pkgdir$PREFIX/bin/deepcool-linux-port"
+
+  # 系统命令 + 桌面 + 图标
+  install -Dm755 "$pkgdir$PREFIX/bin/deepcool-linux-port" "$pkgdir/usr/bin/deepcool-linux-port"
+  install -d "$pkgdir/usr/share/applications" "$pkgdir/usr/share/icons/hicolor/256x256/apps"
+  cp "$pkgdir$PREFIX/app/resources/app.asar.extracted/resources/icon.png" \
+     "$pkgdir/usr/share/icons/hicolor/256x256/apps/deepcool-linux-port.png"
+  cat > "$pkgdir/usr/share/applications/deepcool-linux-port.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=DeepCool (Linux Port)
+Name[zh_CN]=DeepCool（Linux 移植版）
+Comment=DeepCool 1.2.12 official UI with Arch Linux sensor and LM-Series bridge
+Exec=/usr/bin/deepcool-linux-port
+Icon=deepcool-linux-port
+Terminal=false
+StartupNotify=true
+Categories=Settings;HardwareSettings;
+StartupWMClass=DeepCool
+EOF
+
+  # daemon
+  install -Dm0755 "$srcdir/daemon/deepcool-lm-daemon.py" "$pkgdir/usr/local/bin/deepcool-lm-daemon"
+  install -Dm0644 "$srcdir/daemon/deepcool-lm-daemon.service" "$pkgdir/usr/lib/systemd/system/deepcool-lm-daemon.service"
+}
+
+post_install() {
+  groupadd -f deepcool
+  systemctl daemon-reload
+  systemctl enable deepcool-lm-daemon.service >/dev/null 2>&1 || true
+  # 把安装者加入组（重新登录生效）；socket ACL 由 daemon 启动时按成员写入
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    usermod -aG deepcool "$SUDO_USER" || true
+  fi
+  echo
+  echo '== DeepCool Linux Port 已安装 =='
+  echo '  请将桌面用户加入 deepcool 组（重登生效）：'
+  echo '    sudo usermod -aG deepcool <用户名>'
+  echo '  启动：deepcool-linux-port   （后台/托盘：--hidden）'
+  echo '  若 LCD 无画面：sudo systemctl restart deepcool-lm-daemon'
+}
+
+pre_remove() {
+  systemctl stop deepcool-lm-daemon.service 2>/dev/null || true
+  systemctl disable deepcool-lm-daemon.service 2>/dev/null || true
+}
+
+post_remove() {
+  systemctl daemon-reload
+  echo '已删除；用户数据（~/.config/DeepCool-Linux-Port）保留。'
+}
