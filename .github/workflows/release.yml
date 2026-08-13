@@ -50,10 +50,23 @@ jobs:
           node-version: 18
           cache: npm
 
-      - name: Install build tools (7z/zstd)
+      - name: Install build tools (7zz official + zstd)
         run: |
+          set -euo pipefail
+          # Ubuntu p7zip(16.02) 解 DeepCool NSIS 会对部分 mp4 报 Data Error；
+          # 改用 7-Zip 官方静态二进制（7zz，本机 Arch 同源），放入 PATH 并别名 7z。
+          curl -fsSL --retry 3 -o /tmp/7zz.tar.xz \
+            'https://www.7-zip.org/a/7z2602-linux-x64.tar.xz'
+          mkdir -p /tmp/7zz
+          tar -xf /tmp/7zz.tar.xz -C /tmp/7zz
+          mkdir -p /tmp/7zz/bin
+          ln -sf /tmp/7zz/7zz /tmp/7zz/bin/7z
+          echo "/tmp/7zz/bin" >> "$GITHUB_PATH"
+          echo "$PATH" | grep -q /tmp/7zz/bin || true
+          # zstd（tar --zstd 需要）；保留 apt zstd
           sudo apt-get update -qq
-          sudo apt-get install -y -qq p7zip-full zstd
+          sudo apt-get install -y -qq zstd
+          /tmp/7zz/7zz | head -3 || true
 
       # ---- 官方安装包：缓存 + 下载 + 校验 ----
       - name: Cache official setup exe
