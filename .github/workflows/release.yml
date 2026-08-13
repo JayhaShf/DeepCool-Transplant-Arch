@@ -129,20 +129,20 @@ jobs:
           TAG="v$VERSION"
           NOTES="## DeepCool Linux Port $VERSION
 
-- Arch Linux 移植：官方 Electron UI + Linux 传感器 + LM-Series LCD（Python daemon）
-- 二进制包为**自包含**：内含 Electron 23 与官方解包素材（约 543M），解压即用
-- 源码包（-source）为纯代码，供 PKGBUILD / 合规分发
-- 依赖：python-pyusb / python-psutil / python-pillow / acl / ffmpeg
+          - Arch Linux 移植：官方 Electron UI + Linux 传感器 + LM-Series LCD（Python daemon）
+          - 二进制包为**自包含**：内含 Electron 23 与官方解包素材（约 543M），解压即用
+          - 源码包（-source）为纯代码，供 PKGBUILD / 合规分发
+          - 依赖：python-pyusb / python-psutil / python-pillow / acl / ffmpeg
 
-### 使用
-\`\`\`bash
-tar --zstd -xf deepcool-linux-port-$VERSION.tar.zst -C /tmp/dc
-/tmp/dc/deepcool-linux-port-$VERSION/bin/deepcool-linux-port
-# 或安装 daemon + /opt + 菜单：
-#   sudo bash /tmp/dc/deepcool-linux-port-$VERSION/packaging/install-tarball.sh /tmp/dc/deepcool-linux-port-$VERSION
-\`\`\`
+          ### 使用
+          \`\`\`bash
+          tar --zstd -xf deepcool-linux-port-\$VERSION.tar.zst -C /tmp/dc
+          /tmp/dc/deepcool-linux-port-\$VERSION/bin/deepcool-linux-port
+          # 或安装 daemon + /opt + 菜单：
+          #   sudo bash /tmp/dc/deepcool-linux-port-\$VERSION/packaging/install-tarball.sh /tmp/dc/deepcool-linux-port-\$VERSION
+          \`\`\`
 
-> 版权：二进制含 DeepCool 官方素材与 Electron，请自行评估后再公开分发（README 声明「勿再分发官方 payload」）。"
+          > 版权：二进制含 DeepCool 官方素材与 Electron，请自行评估后再公开分发（README 声明「勿再分发官方 payload」）。"
           gh release create "$TAG" \
             dist/deepcool-linux-port-$VERSION.tar.zst \
             dist/deepcool-linux-port-$VERSION-source.tar.zst \
