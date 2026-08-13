@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # DeepCool 1.2.12: NSIS -> Electron payload -> app.asar.extracted
+# 7-Zip 二进制可用 ZIP_BIN 环境变量覆盖（CI 上 Ubuntu p7zip 16.02 解 NSIS 会对部分
+# mp4 报 Data Error，须用官方 7-Zip 7zz，例如：ZIP_BIN=/path/to/7zz bash scripts/extract.sh）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -7,9 +9,10 @@ SETUP="${1:-$ROOT/DeepCool-1.2.12-setup.exe}"
 NSIS_DIR="${NSIS_DIR:-$ROOT/work/nsis}"
 APP_DIR="${APP_DIR:-$ROOT/work/windows-app}"
 ASAR_BIN="$ROOT/node_modules/.bin/asar"
+SEVENZIP="${ZIP_BIN:-7z}"
 
 [ -f "$SETUP" ] || { echo "找不到安装包: $SETUP" >&2; exit 1; }
-command -v 7z >/dev/null || { echo "缺少 7z（Arch: sudo pacman -S 7zip）" >&2; exit 1; }
+command -v "$SEVENZIP" >/dev/null || { echo "缺少 7z（Arch: sudo pacman -S 7zip；CI 用官方 7zz 并设 7Z 变量）" >&2; exit 1; }
 
 if [ -f "$APP_DIR/resources/app.asar" ] && [ -d "$APP_DIR/resources/app.asar.extracted" ] && [ "${FORCE_EXTRACT:-0}" != 1 ]; then
   echo "已存在解包结果: $APP_DIR"
@@ -31,13 +34,13 @@ if [ "${FORCE_EXTRACT:-0}" = 1 ]; then
 fi
 mkdir -p "$NSIS_DIR" "$APP_DIR"
 
-echo "[1/4] 解 NSIS 外壳"
-7z x -y -o"$NSIS_DIR" "$SETUP" >/dev/null
+echo "[1/4] 解 NSIS 外壳（7z=$SEVENZIP）"
+"$SEVENZIP" x -y -o"$NSIS_DIR" "$SETUP" >/dev/null
 PAYLOAD="$(find "$NSIS_DIR" -type f -name 'app-64.7z' -print -quit)"
 [ -n "$PAYLOAD" ] || { echo "安装包中未找到 app-64.7z" >&2; exit 1; }
 
 echo "[2/4] 解 Electron Windows payload"
-7z x -y -o"$APP_DIR" "$PAYLOAD" >/dev/null
+"$SEVENZIP" x -y -o"$APP_DIR" "$PAYLOAD" >/dev/null
 if [ -d "$APP_DIR/app" ] && [ ! -f "$APP_DIR/DeepCool.exe" ]; then
   shopt -s dotglob nullglob
   mv "$APP_DIR/app"/* "$APP_DIR/"
