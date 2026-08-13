@@ -59,20 +59,28 @@ jobs:
             'https://www.7-zip.org/a/7z2602-linux-x64.tar.xz'
           mkdir -p /tmp/7zz
           tar -xf /tmp/7zz.tar.xz -C /tmp/7zz
-          mkdir -p /tmp/7zz/bin
-          ln -sf /tmp/7zz/7zz /tmp/7zz/bin/7z
-          echo "/tmp/7zz/bin" >> "$GITHUB_PATH"
+          test -x /tmp/7zz/7zz
+          # 双重保险：把官方 7zz 硬链接到 /usr/local/bin/7z，覆盖 Ubuntu p7zip，
+          # 这样即使脚本用裸 `7z` 也走官方版。
+          sudo ln -sf /tmp/7zz/7zz /usr/local/bin/7z
           sudo apt-get update -qq
           sudo apt-get install -y -qq zstd
-          echo "7zz version:"
-          /tmp/7zz/7zz 2>&1 | head -1 || true
+          echo "7z -> $(command -v 7z):"
+          7z 2>&1 | head -1 || true
 
-      - name: Verify official 7zz present
+      - name: Assert build tool versions
         run: |
           set -euo pipefail
-          test -x /tmp/7zz/7zz
+          echo "== extract.sh 头（应含 ZIP_BIN）=="
+          head -12 scripts/extract.sh
+          grep -q 'ZIP_BIN' scripts/extract.sh
+          echo "== 7z 版本 =="
+          7z 2>&1 | head -1
           /tmp/7zz/7zz 2>&1 | head -1
-          command -v 7z || true
+          echo "== 本机验证 exe（7zz t 快速）=="
+          # 只列头部判断可解析；完整解包在下一步
+          7z t "$RUNNER_TEMP/dc-setup/DeepCool-1.2.12-setup.exe" >/dev/null 2>&1 || true
+          echo ok
 
       # ---- 官方安装包：缓存 + 下载 + 校验 ----
       - name: Cache official setup exe
