@@ -35,6 +35,11 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Install daemon test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-pil python3-psutil python3-usb
+
       - name: Run deterministic tests
         run: npm test
 
