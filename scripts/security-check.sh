@@ -15,12 +15,13 @@ else
   ELECTRON_BIN="$ROOT/electron/electron"
 fi
 if [ -n "${DEEPCOOL_APP_DIR:-}" ]; then
-  APP="$DEEPCOOL_APP_DIR"
+APP="$DEEPCOOL_APP_DIR"
 elif [ -d "$ROOT/work/windows-app" ]; then
   APP="$ROOT/work/windows-app"
 else
   APP="$ROOT/app"
 fi
+SOURCE_ONLY="${DEEPCOOL_SECURITY_SOURCE_ONLY:-0}"
 
 [ -x "$ELECTRON_BIN" ] || { echo "缺少 Electron: $ELECTRON_BIN" >&2; exit 1; }
 [ -f "$ROOT/package-lock.json" ] || { echo "缺少 package-lock.json，无法执行依赖审计" >&2; exit 1; }
@@ -30,17 +31,21 @@ actual_version="$("$ELECTRON_BIN" --version 2>/dev/null | tail -n1)"
   exit 1
 }
 
-EXTRACTED="$APP/resources/app.asar.extracted"
-[ -f "$EXTRACTED/out/main/linux-compat.js" ]
-[ -f "$EXTRACTED/out/main/bytecode-loader.js" ]
-[ -f "$EXTRACTED/out/preload/index.js" ]
-[ -f "$EXTRACTED/out/preload/ipc-policy.js" ]
-[ -f "$EXTRACTED/out/renderer/linux-overlay.js" ]
-grep -q 'linux-compat.js' "$EXTRACTED/out/main/bytecode-loader.js"
-grep -q 'ipc-policy.js' "$EXTRACTED/out/preload/index.js"
-grep -q 'linux-overlay.js' "$EXTRACTED/out/renderer/index.html"
-grep -Fq "object-src 'none'" "$EXTRACTED/out/renderer/index.html"
-grep -Fq "object-src 'none'" "$EXTRACTED/out/renderer/launch.html"
+if [ "$SOURCE_ONLY" = 1 ]; then
+  echo 'source-only security check: extracted vendor payload checks skipped'
+else
+  EXTRACTED="$APP/resources/app.asar.extracted"
+  [ -f "$EXTRACTED/out/main/linux-compat.js" ]
+  [ -f "$EXTRACTED/out/main/bytecode-loader.js" ]
+  [ -f "$EXTRACTED/out/preload/index.js" ]
+  [ -f "$EXTRACTED/out/preload/ipc-policy.js" ]
+  [ -f "$EXTRACTED/out/renderer/linux-overlay.js" ]
+  grep -q 'linux-compat.js' "$EXTRACTED/out/main/bytecode-loader.js"
+  grep -q 'ipc-policy.js' "$EXTRACTED/out/preload/index.js"
+  grep -q 'linux-overlay.js' "$EXTRACTED/out/renderer/index.html"
+  grep -Fq "object-src 'none'" "$EXTRACTED/out/renderer/index.html"
+  grep -Fq "object-src 'none'" "$EXTRACTED/out/renderer/launch.html"
+fi
 grep -q 'setWindowOpenHandler' patches/linux-compat.js
 grep -q 'assertTrustedIpcSender' patches/linux-compat.js
 grep -q 'observeInvocations' patches/preload-bridge.js
