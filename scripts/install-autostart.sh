@@ -8,13 +8,20 @@ BIN="$HOME/.local/bin/deepcool-official-linux"
 DESKTOP="$AUTOSTART_DIR/deepcool-official-linux.desktop"
 
 mkdir -p "$AUTOSTART_DIR"
+desktop_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+EXEC_BIN="$(desktop_escape "$BIN")"
 cat > "$DESKTOP" <<DESK
 [Desktop Entry]
 Type=Application
 Name=DeepCool (Linux Port) Autostart
 Name[zh_CN]=DeepCool（Linux 移植版）开机自启
 Comment=Start DeepCool official UI in background (tray) at login
-Exec=$BIN --hidden
+Exec=$EXEC_BIN --hidden
 Icon=deepcool-official-linux
 Terminal=false
 X-GNOME-Autostart-enabled=true

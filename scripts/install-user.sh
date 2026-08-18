@@ -6,11 +6,21 @@ APP_DIR="$HOME/.local/share/applications"
 ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
 mkdir -p "$BIN_DIR" "$APP_DIR" "$ICON_DIR"
 
-cat > "$BIN_DIR/deepcool-official-linux" <<SH
-#!/usr/bin/env bash
-exec "$ROOT/scripts/run.sh" "\$@"
-SH
-chmod +x "$BIN_DIR/deepcool-official-linux"
+BIN_SCRIPT="$BIN_DIR/deepcool-official-linux"
+printf -v RUN_COMMAND '%q' "$ROOT/scripts/run.sh"
+{
+  printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+  printf 'exec %s "$@"\n' "$RUN_COMMAND"
+} > "$BIN_SCRIPT"
+chmod +x "$BIN_SCRIPT"
+
+desktop_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+EXEC_BIN="$(desktop_escape "$BIN_SCRIPT")"
 
 ICON_SOURCE="$ROOT/work/windows-app/resources/app.asar.extracted/resources/icon.png"
 if [ -f "$ICON_SOURCE" ]; then cp "$ICON_SOURCE" "$ICON_DIR/deepcool-official-linux.png"; fi
@@ -20,7 +30,7 @@ Type=Application
 Name=DeepCool (Linux Port)
 Name[zh_CN]=DeepCool（Linux 移植版）
 Comment=DeepCool 1.2.12 official UI with Arch Linux sensor and LM-Series bridge
-Exec=$BIN_DIR/deepcool-official-linux
+Exec=$EXEC_BIN
 Icon=deepcool-official-linux
 Terminal=false
 StartupNotify=true

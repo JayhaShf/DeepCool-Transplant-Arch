@@ -1,4 +1,7 @@
-# DeepCool 1.2.12 逆向记录
+# DeepCool 1.2.12 逆向记录（历史快照）
+
+本文记录官方 Windows 包的逆向事实，不是当前 Linux 运行说明；当前行为以
+`README.md`、`daemon/README.md` 和代码为准。
 
 目标：解包 / 反编译 `DeepCool-1.2.12-setup.exe`，在 Linux 上运行。
 
@@ -93,7 +96,7 @@ Linux 环境本身具备访问 USB / HID / 消息队列的能力，缺的只是 
   ```
   gdb -q -batch -ex "set env LD_PRELOAD=/tmp/shutdown_epm_shim.so" \
       -ex "set env DISPLAY=:0" -ex run \
-      --args ./electron --no-sandbox --disable-gpu --remote-debugging-port=9224 \
+      --args ./electron --disable-gpu --remote-debugging-port=9224 \
              app/resources/app.asar.extracted
   ```
 
@@ -105,7 +108,7 @@ Linux 环境本身具备访问 USB / HID / 消息队列的能力，缺的只是 
   `test init \\.\pipe\deepcool_sensor_data`、`ready init error: null`
 - 磁盘面板显示真实容量（Linux `df` 数据）
 
-Wine 路径：`wine ./DeepCool.exe --no-sandbox --remote-debugging-port=9222`
+Wine 路径（仅历史实验）：`wine ./DeepCool.exe --no-sandbox --remote-debugging-port=9222`
 也能启动完整 UI，但传感器全 0（Windows 传感器桥不可用）。
 
 ## 5. 仍未解决 / 后续工作

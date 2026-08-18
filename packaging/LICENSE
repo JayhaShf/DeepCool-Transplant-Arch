@@ -1,0 +1,13 @@
+DeepCool Linux Port redistribution notice
+
+The project source is marked UNLICENSED in package.json. No permission to copy,
+modify, or redistribute that source is granted by this notice.
+
+Binary archives produced by this project also contain extracted DeepCool
+application code, artwork, firmware, and other assets. Those materials remain
+the property of their respective copyright holders. Obtain separate permission
+before redistributing a binary archive or Arch package containing them.
+
+Electron and bundled third-party packages retain their own licenses. License
+and notice files supplied with those runtime files are preserved, but this
+notice does not assert that the resulting archive has complete attribution.

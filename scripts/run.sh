@@ -26,22 +26,14 @@ if [ "${DEEPCOOL_GROUP_ACTIVE:-0}" != "1" ] && command -v newgrp >/dev/null 2>&1
     fi
     if [ "$_in_file" = 1 ] && [ "$_active" = 0 ]; then
       export DEEPCOOL_GROUP_ACTIVE=1
-      # 保留启动相关环境变量，经 newgrp 后继续本脚本
+      # newgrp（非 login 模式）继承环境；恢复命令及参数全部 shell-escape。
+      printf -v _resume_cmd 'cd %q && exec /usr/bin/bash %q' "$ROOT" "$ROOT/scripts/run.sh"
+      for _resume_arg in "$@"; do
+        printf -v _quoted_arg ' %q' "$_resume_arg"
+        _resume_cmd+="$_quoted_arg"
+      done
       exec newgrp deepcool <<EOF
-export DEEPCOOL_GROUP_ACTIVE=1
-export DEEPCOOL_CDP='${DEEPCOOL_CDP-}'
-export DEEPCOOL_BACKGROUND='${DEEPCOOL_BACKGROUND-}'
-export REMOTE_DEBUG_PORT='${REMOTE_DEBUG_PORT-}'
-export DEEPCOOL_APP_DIR='${DEEPCOOL_APP_DIR-}'
-export DEEPCOOL_ELECTRON='${DEEPCOOL_ELECTRON-}'
-export DEEPCOOL_USER_DATA_DIR='${DEEPCOOL_USER_DATA_DIR-}'
-export DEEPCOOL_REPREPARE='${DEEPCOOL_REPREPARE-}'
-export DEEPCOOL_SERIAL='${DEEPCOOL_SERIAL-}'
-export XDG_CACHE_HOME='${XDG_CACHE_HOME-}'
-export XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR-}'
-export PATH=$(printf '%q' "$PATH")
-cd $(printf '%q' "$ROOT")
-exec bash $(printf '%q' "$ROOT/scripts/run.sh") $(printf '%q ' "$@")
+$_resume_cmd
 EOF
     fi
   fi
@@ -67,6 +59,26 @@ export DEEPCOOL_BACKGROUND
 if [ ! -x "$ELECTRON" ] || [ ! -d "$APP/resources/app.asar.extracted" ]; then
   "$ROOT/scripts/bootstrap.sh"
 fi
+
+# Electron 必须使用 Chromium sandbox。支持 setuid helper 或内核 user namespace；
+# 两者都不可用时明确失败，不静默退回 --no-sandbox。
+SANDBOX_READY=0
+SANDBOX_HELPER="$(dirname "$ELECTRON")/chrome-sandbox"
+if [ -e "$SANDBOX_HELPER" ]; then
+  read -r HELPER_UID HELPER_GID HELPER_MODE < <(stat -c '%u %g %a' "$SANDBOX_HELPER")
+  if [ ! -L "$SANDBOX_HELPER" ] && [ -f "$SANDBOX_HELPER" ] \
+     && [ "$HELPER_UID" = 0 ] && [ "$HELPER_GID" = 0 ] && [ "$HELPER_MODE" = 4755 ]; then
+    SANDBOX_READY=1
+  fi
+fi
+if [ "$SANDBOX_READY" != 1 ] && command -v unshare >/dev/null 2>&1 && unshare -Ur true 2>/dev/null; then
+  SANDBOX_READY=1
+fi
+if [ "$SANDBOX_READY" != 1 ]; then
+  echo "错误：Chromium sandbox 不可用；拒绝使用 --no-sandbox 启动。" >&2
+  echo "请启用非特权 user namespace，或将 $SANDBOX_HELPER 配置为 root:root 4755。" >&2
+  exit 1
+fi
 # 已打过补丁时跳过 prepare（桌面启动的耗时瓶颈之一）。
 if [ ! -f "$APP/resources/app.asar.extracted/out/main/linux-compat.js" ] ||
    ! grep -q 'linux-compat.js' "$APP/resources/app.asar.extracted/out/main/bytecode-loader.js" ||
@@ -77,7 +89,6 @@ fi
 mkdir -p "$USER_DATA_DIR" "$LOG_DIR"
 
 ARGS=(
-  --no-sandbox
   --disable-gpu
   --no-first-run
   --disable-background-networking
@@ -86,7 +97,14 @@ ARGS=(
   "$APP/resources/app.asar.extracted"
 )
 if [ "$ENABLE_CDP" = 1 ]; then
-  ARGS=(--remote-debugging-port="$PORT" "${ARGS[@]}")
+  case "$PORT" in
+    ''|*[!0-9]*) echo "REMOTE_DEBUG_PORT 必须是 1024..65535 的数字" >&2; exit 2 ;;
+  esac
+  if [ "$PORT" -lt 1024 ] || [ "$PORT" -gt 65535 ]; then
+    echo "REMOTE_DEBUG_PORT 必须在 1024..65535" >&2
+    exit 2
+  fi
+  ARGS=(--remote-debugging-address=127.0.0.1 --remote-debugging-port="$PORT" "${ARGS[@]}")
 fi
 
 echo "DeepCool Linux Port"

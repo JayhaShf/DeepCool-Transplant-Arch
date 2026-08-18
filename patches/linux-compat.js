@@ -8,8 +8,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const net = require('net');
-const { execFileSync, execFile } = require('child_process');
+const { execFile } = require('child_process');
 const { promisify } = require('util');
+const { fileURLToPath } = require('url');
 const execFileAsync = promisify(execFile);
 const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Tray } = require('electron');
 
@@ -35,6 +36,7 @@ app.whenReady().then(() => {
   setTimeout(() => {
     try {
       const windows = BrowserWindow.getAllWindows();
+      for (const win of windows) hardenWindow(win);
       const launch = windows.find((win) => win.getURL().includes('launch.html'));
       const main = windows.find((win) => win.getURL().includes('index.html'));
       for (const win of windows) {
@@ -162,8 +164,29 @@ function ok(data) { return { code: 0, message: 'successful', data }; }
 function readText(file, fallback = '') {
   try { return fs.readFileSync(file, 'utf8').trim(); } catch (_) { return fallback; }
 }
-function execText(file, args = []) {
-  try { return execFileSync(file, args, { encoding: 'utf8', timeout: 2500 }).trim(); } catch (_) { return ''; }
+const commandCache = new Map();
+function execTextCached(file, args = [], ttlMs = 30000) {
+  const key = `${file}\0${args.join('\0')}`;
+  const now = Date.now();
+  const cached = commandCache.get(key);
+  if (cached && cached.value !== undefined && now - cached.at < ttlMs) {
+    return Promise.resolve(cached.value);
+  }
+  if (cached && cached.pending) return cached.pending;
+  const pending = execFileAsync(file, args, {
+    encoding: 'utf8',
+    timeout: 2500,
+    maxBuffer: 2 * 1024 * 1024,
+  }).then(({ stdout }) => {
+    const value = String(stdout || '').trim();
+    commandCache.set(key, { value, at: Date.now(), pending: null });
+    return value;
+  }).catch(() => {
+    commandCache.set(key, { value: '', at: Date.now(), pending: null });
+    return '';
+  });
+  commandCache.set(key, { value: cached && cached.value, at: cached?.at || 0, pending });
+  return pending;
 }
 function round(value, digits = 1) {
   const n = Number(value);
@@ -237,102 +260,348 @@ const DEFAULT_IMAGE_CONFIG = {
   playingAnimation: 'panning',
   switchTime: 3000,
 };
+const PLAYER_ANIMATIONS = new Set(['static', 'panning', 'ease_in_out']);
+const MEDIA_TOTAL_QUOTA_BYTES = 64 * 1024 * 1024;
+const MEDIA_ENTRY_QUOTA_BYTES = 10 * 1024 * 1024;
+const MEDIA_SOURCE_MAX_BYTES = 128 * 1024 * 1024;
+const MEDIA_INDEX_MAX_BYTES = MEDIA_TOTAL_QUOTA_BYTES + 8 * 1024 * 1024;
+const MEDIA_LIST_LIMIT = 30;
+const MAX_PNG_BYTES = 2 * 1024 * 1024;
+const MAX_PNG_BASE64_CHARS = Math.ceil(MAX_PNG_BYTES / 3) * 4;
 let playerConfig = { ...DEFAULT_IMAGE_CONFIG };
 const mediaStore = { imageList: [], gifList: [], videoList: [] };
 let mediaId = 1;
-let mediaPersistReady = false;
+let mediaLoadPromise = null;
+let mediaPersistChain = Promise.resolve();
+let mediaMutationChain = Promise.resolve();
+let mediaBlobBytes = 0;
 
 function userDataFile(name) {
   try { return path.join(app.getPath('userData'), name); } catch (_) { return null; }
 }
 
-function loadJsonFile(name, fallback) {
+async function loadJsonFile(name, fallback, maxBytes = 1024 * 1024) {
   try {
     const file = userDataFile(name);
-    if (!file || !fs.existsSync(file)) return fallback;
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!file) return fallback;
+    const stat = await fs.promises.stat(file).catch(() => null);
+    if (!stat) return fallback;
+    if (!stat.isFile() || stat.size > maxBytes) {
+      throw new Error(`${name} exceeds the ${maxBytes}-byte read limit`);
+    }
+    return JSON.parse(await fs.promises.readFile(file, 'utf8'));
   } catch (error) {
     log('loadJson failed', name, error);
     return fallback;
   }
 }
 
-function saveJsonFile(name, value) {
+async function saveJsonFile(name, value) {
+  let temp = null;
   try {
     const file = userDataFile(name);
     if (!file) return false;
-    fs.writeFileSync(file, JSON.stringify(value), 'utf8');
+    const body = JSON.stringify(value);
+    temp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    await fs.promises.writeFile(temp, body, { encoding: 'utf8', mode: 0o600 });
+    await fs.promises.rename(temp, file);
     return true;
   } catch (error) {
     log('saveJson failed', name, error);
+    if (temp) await fs.promises.unlink(temp).catch(() => {});
     return false;
   }
 }
 
-function ensureMediaPersistLoaded() {
-  if (mediaPersistReady) return;
-  mediaPersistReady = true;
-  const savedPlayer = loadJsonFile('player-config.json', null);
-  if (savedPlayer && typeof savedPlayer === 'object') {
-    playerConfig = {
-      playingOrder: savedPlayer.playingOrder || DEFAULT_IMAGE_CONFIG.playingOrder,
-      playingAnimation: savedPlayer.playingAnimation || DEFAULT_IMAGE_CONFIG.playingAnimation,
-      switchTime: Number(savedPlayer.switchTime) || DEFAULT_IMAGE_CONFIG.switchTime,
-    };
+function normalizePlayerConfig(value, previous = DEFAULT_IMAGE_CONFIG) {
+  const source = value && typeof value === 'object' ? value : {};
+  const animation = PLAYER_ANIMATIONS.has(source.playingAnimation)
+    ? source.playingAnimation
+    : previous.playingAnimation || DEFAULT_IMAGE_CONFIG.playingAnimation;
+  const switchTime = Number(source.switchTime);
+  return {
+    // The 1.2.12 renderer only defines "loop" and never offers another order.
+    playingOrder: 'loop',
+    playingAnimation: animation,
+    switchTime: Number.isFinite(switchTime) && switchTime > 0
+      ? Math.min(60000, Math.max(200, Math.round(switchTime)))
+      : previous.switchTime || DEFAULT_IMAGE_CONFIG.switchTime,
+  };
+}
+
+function playerSupportStatus(config = playerConfig, requested = config) {
+  const requestedOrder = requested?.playingOrder || config.playingOrder;
+  const requestedAnimation = requested?.playingAnimation || config.playingAnimation;
+  return {
+    playingOrder: {
+      requested: requestedOrder,
+      applied: 'loop',
+      supported: ['loop'],
+      exact: requestedOrder === 'loop',
+    },
+    playingAnimation: {
+      requested: requestedAnimation,
+      applied: config.playingAnimation === 'static' ? 'static' : 'cut',
+      accepted: [...PLAYER_ANIMATIONS],
+      exact: requestedAnimation === 'static' && config.playingAnimation === 'static',
+      reason: config.playingAnimation === 'static'
+        ? null
+        : 'LCD bridge preserves timing but cannot reproduce renderer slide/fade transitions',
+    },
+    switchTime: { exact: true, min: 200, max: 60000 },
+  };
+}
+
+function mediaRoot() {
+  return userDataFile('media-cache');
+}
+
+function isPathInside(root, candidate) {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function storedFramePath(relativePath) {
+  const root = mediaRoot();
+  const base = userDataFile('');
+  if (!root || !base || typeof relativePath !== 'string') return null;
+  const absolute = path.resolve(base, relativePath);
+  return isPathInside(root, absolute) ? absolute : null;
+}
+
+async function safeStoredFramePath(relativePath) {
+  const candidate = storedFramePath(relativePath);
+  if (!candidate) return null;
+  const realPath = await fs.promises.realpath(candidate).catch(() => null);
+  return realPath && isPathInside(mediaRoot(), realPath) ? realPath : null;
+}
+
+function frameFilesOf(entry) {
+  return Array.isArray(entry?.frameFiles) ? entry.frameFiles.filter((file) => storedFramePath(file)) : [];
+}
+
+function frameBytesOf(entry) {
+  const bytes = Number(entry?.frameBytes);
+  return Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+}
+
+function decodePngDataUrl(dataUrl) {
+  const match = String(dataUrl || '').match(/^data:image\/png;base64,([A-Za-z0-9+/=]+)$/);
+  if (!match) throw new Error('媒体帧不是有效的 PNG data URL');
+  const encoded = match[1];
+  if (encoded.length > MAX_PNG_BASE64_CHARS || encoded.length % 4 !== 0
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+    throw new Error('媒体帧 Base64 编码无效或过大');
   }
-  const savedMedia = loadJsonFile('media-store.json', null);
-  if (savedMedia && typeof savedMedia === 'object') {
-    mediaStore.imageList = Array.isArray(savedMedia.imageList) ? savedMedia.imageList : [];
-    mediaStore.gifList = Array.isArray(savedMedia.gifList) ? savedMedia.gifList : [];
-    mediaStore.videoList = Array.isArray(savedMedia.videoList) ? savedMedia.videoList : [];
-    // 恢复 mediaId 单调递增，避免 id 冲突
-    let maxN = 0;
-    for (const list of [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList]) {
-      for (const entry of list) {
-        const m = String(entry.id || '').match(/linux-(\d+)/);
-        if (m) maxN = Math.max(maxN, Number(m[1]) || 0);
-      }
+  const buffer = Buffer.from(encoded, 'base64');
+  if (!buffer.length || buffer.length > MAX_PNG_BYTES) throw new Error('单帧 PNG 大小超限');
+  return buffer;
+}
+
+async function removeStoredFrames(files) {
+  const directories = new Set();
+  for (const relativePath of files || []) {
+    const absolute = storedFramePath(relativePath);
+    if (!absolute) continue;
+    directories.add(path.dirname(absolute));
+    await fs.promises.unlink(absolute).catch(() => {});
+  }
+  for (const directory of directories) {
+    if (directory !== mediaRoot()) await fs.promises.rmdir(directory).catch(() => {});
+  }
+}
+
+async function writeStoredFrames(id, dataUrls, reclaimBytes = 0) {
+  const buffers = [];
+  let totalBytes = 0;
+  for (const dataUrl of dataUrls || []) {
+    const buffer = decodePngDataUrl(dataUrl);
+    totalBytes += buffer.length;
+    if (totalBytes > MEDIA_ENTRY_QUOTA_BYTES) {
+      throw new Error(`媒体帧超过单项 ${MEDIA_ENTRY_QUOTA_BYTES / 1048576} MiB 配额`);
     }
-    mediaId = maxN + 1;
+    buffers.push(buffer);
   }
+  if (!buffers.length) throw new Error('媒体没有可保存的帧');
+  const projected = Math.max(0, mediaBlobBytes - Math.max(0, reclaimBytes)) + totalBytes;
+  if (projected > MEDIA_TOTAL_QUOTA_BYTES) {
+    throw new Error(`媒体库超过总计 ${MEDIA_TOTAL_QUOTA_BYTES / 1048576} MiB 配额，请先删除旧媒体`);
+  }
+
+  const root = mediaRoot();
+  const base = userDataFile('');
+  if (!root || !base) throw new Error('无法确定媒体缓存目录');
+  const token = `${String(id).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 48)}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const directory = path.join(root, token);
+  const relativeFiles = [];
+  try {
+    await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
+    for (let index = 0; index < buffers.length; index += 1) {
+      const absolute = path.join(directory, `frame-${String(index).padStart(3, '0')}.png`);
+      await fs.promises.writeFile(absolute, buffers[index], { mode: 0o600 });
+      relativeFiles.push(path.relative(base, absolute));
+    }
+    return { frameFiles: relativeFiles, frameBytes: totalBytes };
+  } catch (error) {
+    await removeStoredFrames(relativeFiles);
+    await fs.promises.rmdir(directory).catch(() => {});
+    throw error;
+  }
+}
+
+function publicMediaEntry(entry) {
+  if (!entry || typeof entry !== 'object') return entry;
+  const result = { ...entry, hasPlayback: frameFilesOf(entry).length > 0 };
+  delete result.frameFiles;
+  delete result.frameBytes;
+  delete result.frames;
+  delete result.frameDataUrl;
+  return result;
+}
+
+function publicMediaStore() {
+  return {
+    imageList: mediaStore.imageList.map(publicMediaEntry),
+    gifList: mediaStore.gifList.map(publicMediaEntry),
+    videoList: mediaStore.videoList.map(publicMediaEntry),
+  };
+}
+
+function allMediaEntries() {
+  return [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList].flat();
+}
+
+async function validateStoredFrameReferences() {
+  mediaBlobBytes = 0;
+  for (const entry of allMediaEntries()) {
+    const valid = [];
+    let bytes = 0;
+    for (const relativePath of frameFilesOf(entry)) {
+      const absolute = await safeStoredFramePath(relativePath);
+      const stat = absolute ? await fs.promises.stat(absolute).catch(() => null) : null;
+      if (!stat || !stat.isFile() || stat.size <= 0 || stat.size > 2 * 1024 * 1024) continue;
+      if (mediaBlobBytes + bytes + stat.size > MEDIA_TOTAL_QUOTA_BYTES) continue;
+      valid.push(relativePath);
+      bytes += stat.size;
+    }
+    entry.frameFiles = valid;
+    entry.frameBytes = bytes;
+    entry.frameCount = valid.length;
+    mediaBlobBytes += bytes;
+  }
+}
+
+async function migrateEmbeddedFrames() {
+  let changed = false;
+  for (const entry of allMediaEntries()) {
+    const legacyFrames = Array.isArray(entry.frames) && entry.frames.length
+      ? entry.frames.filter(Boolean)
+      : (entry.frameDataUrl ? [entry.frameDataUrl] : []);
+    delete entry.frames;
+    delete entry.frameDataUrl;
+    if (!legacyFrames.length || frameFilesOf(entry).length) continue;
+    try {
+      const stored = await writeStoredFrames(entry.id, legacyFrames, 0);
+      entry.frameFiles = stored.frameFiles;
+      entry.frameBytes = stored.frameBytes;
+      entry.frameCount = stored.frameFiles.length;
+      mediaBlobBytes += stored.frameBytes;
+    } catch (error) {
+      entry.frameFiles = [];
+      entry.frameBytes = 0;
+      entry.frameCount = 0;
+      log('legacy media frame migration skipped', entry.id, error);
+    }
+    changed = true;
+  }
+  return changed;
 }
 
 function persistMediaStore() {
-  ensureMediaPersistLoaded();
-  // frameDataUrl 可能较大：仍持久化以便重启后多媒体模式可恢复最近图
-  saveJsonFile('media-store.json', mediaStore);
+  const snapshot = publicMediaStore();
+  // Keep the private frame references in the on-disk index, but never send
+  // them (or frame payloads) through getAllMedia.
+  for (const key of ['imageList', 'gifList', 'videoList']) {
+    snapshot[key] = mediaStore[key].map((entry) => {
+      const value = { ...entry, frameFiles: frameFilesOf(entry), frameBytes: frameBytesOf(entry) };
+      delete value.frames;
+      delete value.frameDataUrl;
+      delete value.hasPlayback;
+      return value;
+    });
+  }
+  const write = () => saveJsonFile('media-store.json', snapshot).then((saved) => {
+    if (!saved) throw new Error('媒体索引写入失败');
+  });
+  const next = mediaPersistChain.then(write, write);
+  mediaPersistChain = next.catch(() => {});
+  return next;
 }
 
 function persistPlayerConfig() {
-  ensureMediaPersistLoaded();
-  saveJsonFile('player-config.json', playerConfig);
+  const snapshot = { ...playerConfig };
+  const write = () => saveJsonFile('player-config.json', snapshot).then((saved) => {
+    if (!saved) throw new Error('播放配置写入失败');
+  });
+  const next = mediaPersistChain.then(write, write);
+  mediaPersistChain = next.catch(() => {});
+  return next;
 }
 
-function mediaFromUpload(data, serialNumber, frameDataUrl) {
-  ensureMediaPersistLoaded();
+function ensureMediaPersistLoaded() {
+  if (mediaLoadPromise) return mediaLoadPromise;
+  mediaLoadPromise = (async () => {
+    const savedPlayer = await loadJsonFile('player-config.json', null);
+    if (savedPlayer && typeof savedPlayer === 'object') {
+      playerConfig = normalizePlayerConfig(savedPlayer);
+    }
+    const savedMedia = await loadJsonFile('media-store.json', null, MEDIA_INDEX_MAX_BYTES);
+    if (savedMedia && typeof savedMedia === 'object') {
+      mediaStore.imageList = Array.isArray(savedMedia.imageList) ? savedMedia.imageList : [];
+      mediaStore.gifList = Array.isArray(savedMedia.gifList) ? savedMedia.gifList : [];
+      mediaStore.videoList = Array.isArray(savedMedia.videoList) ? savedMedia.videoList : [];
+    }
+    await validateStoredFrameReferences();
+    const migrated = await migrateEmbeddedFrames();
+    if (migrated) await persistMediaStore();
+  })().catch((error) => {
+    log('media persistence initialization failed', error);
+  });
+  return mediaLoadPromise;
+}
+
+function mediaFromUpload(data, serialNumber) {
   const type = String(data?.mediaType || 'image').toLowerCase();
   const pathValue = data?.path || data?.originalPath || '';
   const isGif = type === 'gif' || /\.gif$/i.test(pathValue);
-  const bucket = isGif ? 'gifList' : (type === 'video' ? 'videoList' : 'imageList');
-  const id = String(data?.id || `linux-${mediaId++}`);
+  const mediaType = type === 'video' ? 'video' : (isGif ? 'gif' : 'image');
+  const bucket = mediaType === 'gif' ? 'gifList' : (mediaType === 'video' ? 'videoList' : 'imageList');
+  let id = data?.id != null ? String(data.id) : String(Date.now() + mediaId++);
+  while (data?.id == null && allMediaEntries().some((entry) => String(entry.id) === id)) {
+    id = String(Date.now() + mediaId++);
+  }
   // 同一时间只保留一个 isCurrent
   for (const list of [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList]) {
     for (const entry of list) entry.isCurrent = false;
   }
   // modify：同 id 则更新
   let item = null;
+  let replaced = null;
   for (const list of [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList]) {
     const idx = list.findIndex((m) => String(m.id) === id);
     if (idx >= 0) {
+      replaced = list[idx];
       item = {
         ...list[idx],
-        mediaType: isGif ? 'gif' : (list[idx].mediaType || 'image'),
+        mediaType,
         elementPath: pathValue || list[idx].elementPath,
         firstFramePath: pathValue || list[idx].firstFramePath,
+        path: pathValue || list[idx].path || list[idx].elementPath,
         name: (pathValue && pathValue.split('/').pop()) || list[idx].name || 'image',
         isCurrent: true,
         serialNumber: serialNumber || list[idx].serialNumber,
-        frameDataUrl: frameDataUrl || list[idx].frameDataUrl || null,
+        updatedAt: Date.now(),
       };
       // 类型桶变化时迁移
       if (list !== mediaStore[bucket]) {
@@ -347,86 +616,144 @@ function mediaFromUpload(data, serialNumber, frameDataUrl) {
   if (!item) {
     item = {
       id,
-      mediaType: isGif ? 'gif' : 'image',
+      mediaType,
       elementPath: pathValue,
       firstFramePath: pathValue,
+      path: pathValue,
       name: pathValue.split('/').pop() || 'image',
       isCurrent: true,
       serialNumber,
-      frameDataUrl: frameDataUrl || null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
     };
     mediaStore[bucket].push(item);
   }
-  // 限制列表长度，避免 frameDataUrl 把 userData 撑爆
-  if (mediaStore[bucket].length > 30) {
-    mediaStore[bucket] = mediaStore[bucket].slice(-30);
+  const evicted = [];
+  if (mediaStore[bucket].length > MEDIA_LIST_LIMIT) {
+    evicted.push(...mediaStore[bucket].slice(0, -MEDIA_LIST_LIMIT));
+    mediaStore[bucket] = mediaStore[bucket].slice(-MEDIA_LIST_LIMIT);
   }
-  persistMediaStore();
-  return { item, bucket };
+  return { item, bucket, replaced, evicted };
 }
 
 function currentMediaList() {
-  ensureMediaPersistLoaded();
   for (const list of [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList]) {
     const cur = list.find((m) => m && m.isCurrent);
-    if (cur) return [cur];
+    if (cur) return [publicMediaEntry(cur)];
   }
   return [];
 }
 
-function processImageToFrame(data) {
-  const pathValue = data?.path || data?.originalPath || '';
-  if (!pathValue) throw new Error('上传数据缺少文件路径');
-  const image = nativeImage.createFromPath(pathValue);
-  if (image.isEmpty()) throw new Error(`无法读取图片: ${pathValue}`);
-  let img = image;
-  // 官方裁剪参数：positionX/Y + cutWidth/cutHeight（可缺省）
-  const cx = Number(data?.positionX);
-  const cy = Number(data?.positionY);
-  const cw = Number(data?.cutWidth);
-  const ch = Number(data?.cutHeight);
-  if (Number.isFinite(cx) && Number.isFinite(cy) && Number.isFinite(cw) && Number.isFinite(ch) && cw > 0 && ch > 0) {
-    const crop = { x: Math.round(cx), y: Math.round(cy), width: Math.round(cw), height: Math.round(ch) };
-    try { img = image.crop(crop); } catch (_) {}
-  }
-  const resized = img.resize({ width: 320, height: 240, quality: 'best' });
-  if (resized.isEmpty()) throw new Error('图片处理失败');
-  return `data:image/png;base64,${resized.toPNG().toString('base64')}`;
+function queueMediaMutation(task) {
+  const next = mediaMutationChain.then(task, task);
+  mediaMutationChain = next.catch(() => {});
+  return next;
 }
 
+let ffmpegLookupPromise = null;
 function findFfmpeg() {
-  for (const bin of ['ffmpeg', '/usr/bin/ffmpeg', '/usr/sbin/ffmpeg']) {
-    try {
-      execFileSync(bin, ['-version'], { timeout: 2000, stdio: 'ignore' });
-      return bin;
-    } catch (_) {}
-  }
-  return null;
+  if (ffmpegLookupPromise) return ffmpegLookupPromise;
+  ffmpegLookupPromise = (async () => {
+    for (const bin of ['ffmpeg', '/usr/bin/ffmpeg', '/usr/sbin/ffmpeg']) {
+      try {
+        await execFileAsync(bin, ['-version'], { timeout: 2000, maxBuffer: 256 * 1024 });
+        return bin;
+      } catch (_) {}
+    }
+    return null;
+  })();
+  return ffmpegLookupPromise;
 }
 
-function pngFileToDataUrl(filePath) {
-  const image = nativeImage.createFromPath(filePath);
-  if (image.isEmpty()) return null;
-  const resized = image.resize({ width: 320, height: 240, quality: 'best' });
-  if (resized.isEmpty()) return null;
-  return `data:image/png;base64,${resized.toPNG().toString('base64')}`;
+let ffprobeLookupPromise = null;
+function findFfprobe() {
+  if (ffprobeLookupPromise) return ffprobeLookupPromise;
+  ffprobeLookupPromise = (async () => {
+    for (const bin of ['ffprobe', '/usr/bin/ffprobe', '/usr/sbin/ffprobe']) {
+      try {
+        await execFileAsync(bin, ['-version'], { timeout: 2000, maxBuffer: 256 * 1024 });
+        return bin;
+      } catch (_) {}
+    }
+    return null;
+  })();
+  return ffprobeLookupPromise;
+}
+
+async function probeMediaDimensions(filePath) {
+  const ffprobe = await findFfprobe();
+  if (!ffprobe) throw new Error('未找到 ffprobe，无法安全检查媒体尺寸（pacman -S ffmpeg）');
+  const { stdout } = await execFileAsync(ffprobe, [
+    '-v', 'error', '-select_streams', 'v:0',
+    '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x', filePath,
+  ], { timeout: 10000, maxBuffer: 256 * 1024 });
+  const match = String(stdout || '').trim().match(/^(\d+)x(\d+)$/);
+  if (!match) throw new Error('无法读取媒体像素尺寸');
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (width <= 0 || height <= 0 || width > 16384 || height > 16384
+    || width * height > 64 * 1024 * 1024) {
+    throw new Error('媒体像素尺寸超限');
+  }
+  return { width, height };
+}
+
+async function pngFileToDataUrl(filePath) {
+  const buffer = await fs.promises.readFile(filePath);
+  const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (!buffer.length || buffer.length > 2 * 1024 * 1024
+    || buffer.length < pngSignature.length || !buffer.subarray(0, pngSignature.length).equals(pngSignature)) {
+    throw new Error('ffmpeg 输出的 PNG 帧无效或过大');
+  }
+  return `data:image/png;base64,${buffer.toString('base64')}`;
+}
+
+async function processImageToFrame(data, dimensions) {
+  const filePath = data?.path || data?.originalPath || '';
+  if (!filePath) throw new Error('上传数据缺少文件路径');
+  const ffmpeg = await findFfmpeg();
+  if (!ffmpeg) throw new Error('未找到 ffmpeg，无法安全解析图片（pacman -S ffmpeg）');
+  const tmpRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'deepcool-image-'));
+  const output = path.join(tmpRoot, 'frame.png');
+  try {
+    const cx = Math.round(Number(data?.positionX));
+    const cy = Math.round(Number(data?.positionY));
+    const cw = Math.round(Number(data?.cutWidth));
+    const ch = Math.round(Number(data?.cutHeight));
+    const canCrop = [cx, cy, cw, ch].every(Number.isFinite)
+      && cx >= 0 && cy >= 0 && cw > 0 && ch > 0
+      && cx + cw <= dimensions.width && cy + ch <= dimensions.height;
+    const crop = canCrop ? `crop=${cw}:${ch}:${cx}:${cy},` : '';
+    const vf = `${crop}scale=320:240:force_original_aspect_ratio=decrease,pad=320:240:(ow-iw)/2:(oh-ih)/2`;
+    await execFileAsync(ffmpeg, [
+      '-v', 'error', '-nostdin', '-threads', '1', '-max_alloc', String(64 * 1024 * 1024),
+      '-y', '-i', filePath, '-map', '0:v:0', '-frames:v', '1', '-vf', vf, output,
+    ], { timeout: 30000, maxBuffer: 1024 * 1024 });
+    return await pngFileToDataUrl(output);
+  } finally {
+    await fs.promises.unlink(output).catch(() => {});
+    await fs.promises.rmdir(tmpRoot).catch(() => {});
+  }
 }
 
 // GIF/视频 → 多帧 PNG dataURL。官方 ImageConfig.switchTime 控制切换间隔（默认 3s）。
 // 限制帧数与时长，避免 userData/推帧过重。
 async function extractMediaFrames(filePath, { kind = 'gif', maxFrames = 24, maxSeconds = 8 } = {}) {
-  const ffmpeg = findFfmpeg();
+  const ffmpeg = await findFfmpeg();
   if (!ffmpeg) throw new Error('未找到 ffmpeg，无法解析 GIF/视频（pacman -S ffmpeg）');
   if (!filePath || !fs.existsSync(filePath)) throw new Error(`文件不存在: ${filePath}`);
 
-  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'deepcool-media-'));
+  const tmpRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'deepcool-media-'));
   const pattern = path.join(tmpRoot, 'frame_%03d.png');
   try {
     // 统一缩放到 320x240，控制输出帧率：GIF 用源帧率但 cap；视频约 4fps 抽帧
     const vf = kind === 'video'
       ? 'fps=4,scale=320:240:force_original_aspect_ratio=decrease,pad=320:240:(ow-iw)/2:(oh-ih)/2'
       : 'scale=320:240:force_original_aspect_ratio=decrease,pad=320:240:(ow-iw)/2:(oh-ih)/2';
-    const args = ['-y', '-i', filePath, '-t', String(maxSeconds), '-vf', vf, '-frames:v', String(maxFrames), pattern];
+    const args = [
+      '-v', 'error', '-nostdin', '-threads', '1', '-max_alloc', String(64 * 1024 * 1024),
+      '-y', '-i', filePath, '-map', '0:v:0', '-t', String(maxSeconds), '-vf', vf, '-frames:v', String(maxFrames), pattern,
+    ];
     await execFileAsync(ffmpeg, args, { timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
     const files = fs.readdirSync(tmpRoot)
       .filter((n) => /^frame_\d+\.png$/.test(n))
@@ -434,24 +761,150 @@ async function extractMediaFrames(filePath, { kind = 'gif', maxFrames = 24, maxS
       .map((n) => path.join(tmpRoot, n));
     if (!files.length) throw new Error('未能从媒体中抽出任何帧');
     const frames = [];
+    let totalFrameBytes = 0;
     for (const f of files) {
-      const url = pngFileToDataUrl(f);
+      const stat = await fs.promises.stat(f);
+      totalFrameBytes += stat.size;
+      if (totalFrameBytes > MEDIA_ENTRY_QUOTA_BYTES) {
+        throw new Error(`媒体帧超过单项 ${MEDIA_ENTRY_QUOTA_BYTES / 1048576} MiB 配额`);
+      }
+      const url = await pngFileToDataUrl(f);
       if (url) frames.push(url);
     }
     if (!frames.length) throw new Error('抽出的帧无法解码为 PNG');
     return frames;
   } finally {
-    try {
-      for (const n of fs.readdirSync(tmpRoot)) {
-        try { fs.unlinkSync(path.join(tmpRoot, n)); } catch (_) {}
-      }
-      fs.rmdirSync(tmpRoot);
-    } catch (_) {}
+    const names = await fs.promises.readdir(tmpRoot).catch(() => []);
+    await Promise.all(names.map((name) => fs.promises.unlink(path.join(tmpRoot, name)).catch(() => {})));
+    await fs.promises.rmdir(tmpRoot).catch(() => {});
   }
 }
 
+const grantedMediaPaths = new Map();
+const MEDIA_GRANT_TTL_MS = 15 * 60 * 1000;
+
+async function canonicalRegularFile(filePath) {
+  if (typeof filePath !== 'string' || !path.isAbsolute(filePath) || filePath.includes('\0')) {
+    throw new Error('媒体路径必须是本地绝对路径');
+  }
+  const realPath = await fs.promises.realpath(filePath);
+  const stat = await fs.promises.stat(realPath);
+  if (!stat.isFile()) throw new Error('媒体路径不是普通文件');
+  if (stat.size <= 0 || stat.size > MEDIA_SOURCE_MAX_BYTES) {
+    throw new Error(`媒体源文件大小必须在 1 字节到 ${MEDIA_SOURCE_MAX_BYTES / 1048576} MiB 之间`);
+  }
+  return { realPath, size: stat.size };
+}
+
+async function grantSelectedMediaPath(filePath) {
+  const { realPath } = await canonicalRegularFile(filePath);
+  grantedMediaPaths.set(realPath, Date.now() + MEDIA_GRANT_TTL_MS);
+  return realPath;
+}
+
+async function assertAllowedMediaPath(filePath) {
+  const { realPath } = await canonicalRegularFile(filePath);
+  const now = Date.now();
+  for (const [granted, expiresAt] of grantedMediaPaths) {
+    if (expiresAt <= now) grantedMediaPaths.delete(granted);
+  }
+  const granted = (grantedMediaPaths.get(realPath) || 0) > now;
+  let persisted = false;
+  if (!granted) {
+    for (const entry of allMediaEntries()) {
+      const known = entry && (entry.elementPath || entry.path);
+      if (!known || typeof known !== 'string') continue;
+      try {
+        if (await fs.promises.realpath(known) === realPath) {
+          persisted = true;
+          break;
+        }
+      } catch (_) {}
+    }
+  }
+  if (!granted && !persisted) {
+    throw new Error('媒体路径未由文件选择器授权，也不属于已保存的媒体');
+  }
+  return realPath;
+}
+
+async function readPlaybackFrames(entry) {
+  const frames = [];
+  let total = 0;
+  for (const relativePath of frameFilesOf(entry)) {
+    const absolute = await safeStoredFramePath(relativePath);
+    if (!absolute) continue;
+    const buffer = await fs.promises.readFile(absolute);
+    total += buffer.length;
+    if (!buffer.length || buffer.length > 2 * 1024 * 1024 || total > MEDIA_ENTRY_QUOTA_BYTES) {
+      throw new Error('已保存的媒体帧超过读取配额');
+    }
+    frames.push(`data:image/png;base64,${buffer.toString('base64')}`);
+  }
+  return frames;
+}
+
+async function playbackForEntry(entry, existingFrames = null) {
+  if (!entry) return null;
+  let frames = Array.isArray(existingFrames) && existingFrames.length
+    ? existingFrames
+    : await readPlaybackFrames(entry);
+  let playlistTotal = 1;
+  let playlistTruncated = false;
+  if (entry.mediaType === 'image' && playerConfig.playingAnimation !== 'static') {
+    const selectedIndex = mediaStore.imageList.indexOf(entry);
+    const ordered = selectedIndex >= 0
+      ? mediaStore.imageList.slice(selectedIndex).concat(mediaStore.imageList.slice(0, selectedIndex))
+      : [entry];
+    playlistTotal = ordered.length;
+    const playlist = [];
+    let playlistBytes = 0;
+    for (const item of ordered) {
+      const itemFrames = item === entry && frames.length ? frames : await readPlaybackFrames(item);
+      if (!itemFrames.length) continue;
+      const itemBytes = frameBytesOf(item) || Math.ceil(itemFrames[0].length * 3 / 4);
+      if (playlistBytes + itemBytes > MEDIA_ENTRY_QUOTA_BYTES) {
+        playlistTruncated = true;
+        break;
+      }
+      playlist.push(itemFrames[0]);
+      playlistBytes += itemBytes;
+    }
+    if (playlist.length) frames = playlist;
+  } else if (entry.mediaType === 'image' && frames.length > 1) {
+    frames = [frames[0]];
+  }
+  const support = playerSupportStatus();
+  support.playlist = {
+    mediaType: entry.mediaType,
+    included: frames.length,
+    total: playlistTotal,
+    truncated: playlistTruncated,
+  };
+  if (!frames.length) return {
+    selected: true,
+    frameDataUrl: null,
+    frames: [],
+    media: publicMediaEntry(entry),
+    intervalMs: playerConfig.switchTime,
+    playerConfig: { ...playerConfig },
+    support,
+  };
+  return {
+    selected: true,
+    frameDataUrl: frames[0],
+    frames,
+    media: publicMediaEntry(entry),
+    intervalMs: playerConfig.switchTime,
+    playerConfig: { ...playerConfig },
+    support,
+  };
+}
+
 async function processMediaUpload(media, serialNumber, { kind = 'image', id } = {}) {
-  const pathValue = media?.path || media?.originalPath || '';
+  const requestedPath = media?.path || media?.originalPath || '';
+  const pathValue = await assertAllowedMediaPath(requestedPath);
+  const dimensions = await probeMediaDimensions(pathValue);
   const lower = String(pathValue).toLowerCase();
   const isGif = kind === 'gif' || lower.endsWith('.gif') || String(media?.mediaType || '').toLowerCase() === 'gif';
   const isVideo = kind === 'video'
@@ -468,27 +921,48 @@ async function processMediaUpload(media, serialNumber, { kind = 'image', id } = 
     });
     frameDataUrl = frames[0];
   } else {
-    frameDataUrl = processImageToFrame(media || {});
+    frameDataUrl = await processImageToFrame({ ...(media || {}), path: pathValue, originalPath: pathValue }, dimensions);
     frames = [frameDataUrl];
   }
 
-  const payload = { ...(media || {}), id: id || media?.id, mediaType: isVideo ? 'video' : (isGif ? 'gif' : 'image') };
-  const { item } = mediaFromUpload(payload, serialNumber, frameDataUrl);
-  // 多帧挂在 item 上并持久化（数量已受限）
-  item.frames = frames;
-  item.frameCount = frames.length;
-  // 写回 store 中的同一项
-  for (const list of [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList]) {
-    const idx = list.findIndex((m) => String(m.id) === String(item.id));
-    if (idx >= 0) list[idx] = item;
-  }
-  persistMediaStore();
-  return {
-    frameDataUrl,
-    frames,
-    media: item,
-    intervalMs: Math.max(200, Number(playerConfig.switchTime) || 3000),
+  const payload = {
+    ...(media || {}),
+    id: id || media?.id,
+    path: pathValue,
+    originalPath: pathValue,
+    mediaType: isVideo ? 'video' : (isGif ? 'gif' : 'image'),
   };
+  return queueMediaMutation(async () => {
+    const backup = {
+      imageList: mediaStore.imageList.map((entry) => ({ ...entry })),
+      gifList: mediaStore.gifList.map((entry) => ({ ...entry })),
+      videoList: mediaStore.videoList.map((entry) => ({ ...entry })),
+    };
+    const previousBlobBytes = mediaBlobBytes;
+    let stored = null;
+    try {
+      const { item, replaced, evicted } = mediaFromUpload(payload, serialNumber);
+      const reclaimedEntries = [replaced, ...evicted].filter(Boolean);
+      const reclaimedFiles = [...new Set(reclaimedEntries.flatMap(frameFilesOf))];
+      const reclaimedBytes = reclaimedEntries.reduce((sum, entry) => sum + frameBytesOf(entry), 0);
+      stored = await writeStoredFrames(item.id, frames, reclaimedBytes);
+      item.frameFiles = stored.frameFiles;
+      item.frameBytes = stored.frameBytes;
+      item.frameCount = stored.frameFiles.length;
+      await persistMediaStore();
+      mediaBlobBytes = Math.max(0, previousBlobBytes - reclaimedBytes) + stored.frameBytes;
+      await removeStoredFrames(reclaimedFiles);
+      grantedMediaPaths.delete(pathValue);
+      return await playbackForEntry(item, frames);
+    } catch (error) {
+      if (stored) await removeStoredFrames(stored.frameFiles);
+      mediaStore.imageList = backup.imageList;
+      mediaStore.gifList = backup.gifList;
+      mediaStore.videoList = backup.videoList;
+      mediaBlobBytes = previousBlobBytes;
+      throw error;
+    }
+  });
 }
 
 let statusCache = null;
@@ -627,21 +1101,29 @@ function cpuName() {
 let cachedGpuName;
 function gpuName() {
   if (cachedGpuName !== undefined) return cachedGpuName;
-  cachedGpuName = execText('nvidia-smi', ['--query-gpu=name', '--format=csv,noheader']).split('\n')[0] || 'GPU';
+  cachedGpuName = 'GPU';
+  execTextCached('nvidia-smi', ['--query-gpu=name', '--format=csv,noheader'], 5 * 60 * 1000)
+    .then((output) => { cachedGpuName = output.split('\n')[0] || cachedGpuName; });
   return cachedGpuName;
 }
 let cachedMemoryClock;
 function memoryClock() {
   if (cachedMemoryClock !== undefined) return cachedMemoryClock;
-  const out = execText('dmidecode', ['--type', 'memory']);
-  const speeds = [...out.matchAll(/^\s*Configured Memory Speed:\s*(\d+)\s*MT\/s/gm)].map((m) => Number(m[1]));
-  cachedMemoryClock = speeds.length ? Math.max(...speeds) : 0;
+  cachedMemoryClock = 0;
+  execTextCached('dmidecode', ['--type', 'memory'], 60 * 60 * 1000).then((output) => {
+    const speeds = [...output.matchAll(/^\s*Configured Memory Speed:\s*(\d+)\s*MT\/s/gm)].map((m) => Number(m[1]));
+    if (speeds.length) cachedMemoryClock = Math.max(...speeds);
+  });
   return cachedMemoryClock;
 }
 
-function systemInfo() {
+async function systemInfo() {
   const board = [readText('/sys/devices/virtual/dmi/id/board_vendor'), readText('/sys/devices/virtual/dmi/id/board_name')].filter(Boolean).join(' ');
-  const nvidia = execText('nvidia-smi', ['--query-gpu=name,pci.bus_id', '--format=csv,noheader,nounits']).split('\n').filter(Boolean);
+  const [nvidiaText, disks] = await Promise.all([
+    execTextCached('nvidia-smi', ['--query-gpu=name,pci.bus_id', '--format=csv,noheader,nounits'], 5 * 60 * 1000),
+    listDisks(),
+  ]);
+  const nvidia = nvidiaText.split('\n').filter(Boolean);
   const gpu = nvidia.map((line, index) => {
     const comma = line.lastIndexOf(',');
     return {
@@ -651,6 +1133,7 @@ function systemInfo() {
       default: index === 0,
     };
   });
+  if (gpu[0]?.name) cachedGpuName = gpu[0].name;
   return {
     deviceName: os.hostname(),
     systemName: `${readText('/etc/os-release').match(/^PRETTY_NAME=(.*)$/m)?.[1]?.replace(/^"|"$/g, '') || 'Arch Linux'} ${os.release()}`,
@@ -661,16 +1144,20 @@ function systemInfo() {
     ramName: [`${round(os.totalmem() / 1073741824, 0)} GB RAM`],
     ramSlotCount: 1,
     ramSlotIndex: [0],
-    diskName: listDisks().map((d) => d.name),
-    diskSingle: listDisks(),
+    diskName: disks.map((d) => d.name),
+    diskSingle: disks,
   };
 }
 
-function listDisks() {
+async function listDisks() {
   const rows = [];
   const seen = new Set();
-  const text = execText('df', ['-B1', '--output=source,size,used,avail,pcent,target', '-x', 'tmpfs', '-x', 'devtmpfs']);
-  for (const line of text.split('\n').slice(1)) {
+  const output = await execTextCached(
+    'df',
+    ['-B1', '--output=source,size,used,avail,pcent,target', '-x', 'tmpfs', '-x', 'devtmpfs'],
+    5000
+  );
+  for (const line of output.split('\n').slice(1)) {
     const m = line.trim().match(/^(\S+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)%\s+(.+)$/);
     if (!m || !m[1].startsWith('/dev/') || m[1].startsWith('/dev/loop') || seen.has(m[1])) continue;
     seen.add(m[1]);
@@ -764,8 +1251,95 @@ let lastL122Config = {
   modeChange: 0,
   digitalData: { mainData: 'CPU Temperature', subData1: 'CPU Frequency', subData2: 'CPU Power', orientation: 0 },
 };
+let lastRendererPushedDataUrl = BLACK_320_240_PNG;
 
-const originalHandle = ipcMain.handle.bind(ipcMain);
+function trustedRendererRoots() {
+  const roots = [];
+  try { roots.push(path.resolve(app.getAppPath())); } catch (_) {}
+  if (path.basename(__dirname) === 'main' && path.basename(path.dirname(__dirname)) === 'out') {
+    roots.push(path.resolve(__dirname, '..', '..'));
+  }
+  return [...new Set(roots)];
+}
+
+function isTrustedRendererUrl(rawUrl, roots = trustedRendererRoots()) {
+  if (typeof rawUrl !== 'string' || !rawUrl) return false;
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'file:') return false;
+    const filePath = fileURLToPath(parsed);
+    return roots.some((root) => {
+      const relative = path.relative(path.resolve(root), path.resolve(filePath));
+      return relative === path.join('out', 'renderer', 'index.html')
+        || relative === path.join('out', 'renderer', 'launch.html');
+    });
+  } catch (_) {
+    return false;
+  }
+}
+
+function hardenWindow(win) {
+  try {
+    const webContents = win.webContents;
+    if (webContents.__deepcoolLinuxHardened) return;
+    webContents.__deepcoolLinuxHardened = true;
+    webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    webContents.on('will-navigate', (event, url) => {
+      if (!isTrustedRendererUrl(url)) event.preventDefault();
+    });
+  } catch (error) {
+    log('window hardening failed', error);
+  }
+}
+
+app.on('browser-window-created', (_event, win) => hardenWindow(win));
+
+function isTrustedIpcSender(event) {
+  let frame = event && event.senderFrame;
+  for (let depth = 0; frame && depth < 8; depth += 1) {
+    if (isTrustedRendererUrl(frame.url)) return true;
+    // about:blank child frames inherit the trusted file origin. Other
+    // protocols must never gain IPC access merely through parentage.
+    if (frame.url !== 'about:blank') return false;
+    frame = frame.parent;
+  }
+  try { return isTrustedRendererUrl(event?.sender?.getURL()); } catch (_) { return false; }
+}
+
+function assertTrustedIpcSender(event, channel) {
+  if (isTrustedIpcSender(event)) return;
+  let senderUrl = '';
+  try { senderUrl = event?.senderFrame?.url || event?.sender?.getURL() || ''; } catch (_) {}
+  log('blocked untrusted IPC sender', channel, senderUrl);
+  const error = new Error(`拒绝来自非应用页面的 IPC: ${channel}`);
+  error.code = 'ERR_UNTRUSTED_IPC_SENDER';
+  throw error;
+}
+
+const rawHandle = ipcMain.handle.bind(ipcMain);
+function originalHandle(channel, listener) {
+  return rawHandle(channel, async (event, ...args) => {
+    assertTrustedIpcSender(event, channel);
+    return listener(event, ...args);
+  });
+}
+
+function selectedMediaEntry(elements) {
+  const element = Array.isArray(elements) ? elements[0] : elements;
+  if (!element || typeof element !== 'object') return null;
+  const rawId = element.id;
+  const id = rawId == null || String(rawId) === 'NaN' ? null : String(rawId);
+  const paths = [];
+  if (Array.isArray(element?.element?.data)) paths.push(...element.element.data.filter((value) => typeof value === 'string'));
+  if (typeof element.elementPath === 'string') paths.push(element.elementPath);
+  if (typeof element.path === 'string') paths.push(element.path);
+  return allMediaEntries().find((entry) => (
+    (id != null && String(entry.id) === id)
+    || paths.includes(entry.elementPath)
+    || paths.includes(entry.path)
+  )) || null;
+}
+
 const overrides = {
   'app/get-sensors-data': {
     mode: 'replace',
@@ -773,11 +1347,21 @@ const overrides = {
   },
   'app/get-systeminfo': {
     mode: 'replace',
-    fn: async () => ok(systemInfo()),
+    fn: async () => ok(await systemInfo()),
   },
   'app/get-disk-list': {
     mode: 'replace',
-    fn: async () => ok(listDisks()),
+    fn: async () => ok(await listDisks()),
+  },
+  'app/set-setting': {
+    mode: 'wrap',
+    fn: async (original, event, setting, ...args) => {
+      if (setting && typeof setting === 'object' && 'launch' in setting) {
+        const want = setting.launch === true || setting.launch === 'true';
+        await setAutostartEnabled(want);
+      }
+      return original(event, setting, ...args);
+    },
   },
   'app/get-device-list': {
     mode: 'wrap',
@@ -831,7 +1415,7 @@ const overrides = {
   // 这里只返回静态占位（黑色 PNG data URL 字符串，页面直接绑 img.src）。
   'l122/image-transmission': {
     mode: 'replace',
-    fn: async () => BLACK_320_240_PNG,
+    fn: async () => lastRendererPushedDataUrl,
   },
   'media/selectImg': {
     mode: 'replace',
@@ -843,7 +1427,8 @@ const overrides = {
         filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'gif'] }],
       });
       if (result.canceled || !result.filePaths.length) return ok({ filePaths: [] });
-      return ok({ filePaths: result.filePaths });
+      const granted = await Promise.all(result.filePaths.map(grantSelectedMediaPath));
+      return ok({ filePaths: granted });
     },
   },
   'media/selectGif': {
@@ -856,7 +1441,8 @@ const overrides = {
         filters: [{ name: 'GIF', extensions: ['gif'] }],
       });
       if (result.canceled || !result.filePaths.length) return ok({ filePaths: [] });
-      return ok({ filePaths: result.filePaths });
+      const granted = await Promise.all(result.filePaths.map(grantSelectedMediaPath));
+      return ok({ filePaths: granted });
     },
   },
   'media/selectVideo': {
@@ -869,14 +1455,15 @@ const overrides = {
         filters: [{ name: 'Videos', extensions: ['mp4', 'webm', 'avi', 'mkv'] }],
       });
       if (result.canceled || !result.filePaths.length) return ok({ filePaths: [] });
-      return ok({ filePaths: result.filePaths });
+      const granted = await Promise.all(result.filePaths.map(grantSelectedMediaPath));
+      return ok({ filePaths: granted });
     },
   },
   'l122/uploadSelectedMedia': {
     mode: 'replace',
     fn: async (_event, media, serialNumber) => {
       try {
-        ensureMediaPersistLoaded();
+        await ensureMediaPersistLoaded();
         const result = await processMediaUpload(media || {}, serialNumber, { kind: 'image' });
         log('upload media ok', result.media.elementPath, 'frames', result.frames.length);
         return ok(result);
@@ -890,7 +1477,7 @@ const overrides = {
     mode: 'replace',
     fn: async (_event, media, id, serialNumber) => {
       try {
-        ensureMediaPersistLoaded();
+        await ensureMediaPersistLoaded();
         const result = await processMediaUpload(media || {}, serialNumber, {
           kind: 'image',
           id: id || media?.id,
@@ -907,7 +1494,7 @@ const overrides = {
     mode: 'replace',
     fn: async (_event, media, serialNumber) => {
       try {
-        ensureMediaPersistLoaded();
+        await ensureMediaPersistLoaded();
         const result = await processMediaUpload(media || {}, serialNumber, { kind: 'video' });
         log('upload video ok', result.media.elementPath, 'frames', result.frames.length);
         // 官方视频链路期望结构可能不同；提供 frameDataUrl/frames 供 overlay 轮播
@@ -926,7 +1513,7 @@ const overrides = {
     mode: 'replace',
     fn: async (_event, media, id, serialNumber) => {
       try {
-        ensureMediaPersistLoaded();
+        await ensureMediaPersistLoaded();
         const result = await processMediaUpload(media || {}, serialNumber, {
           kind: 'video',
           id: id || media?.id,
@@ -942,65 +1529,68 @@ const overrides = {
   'l122/getAllMedia': {
     mode: 'replace',
     fn: async () => {
-      ensureMediaPersistLoaded();
-      return ok(mediaStore);
+      await ensureMediaPersistLoaded();
+      return ok(publicMediaStore());
     },
   },
   'l122/deleteOneMedia': {
     mode: 'replace',
     fn: async (_event, id) => {
-      ensureMediaPersistLoaded();
-      for (const key of ['imageList', 'gifList', 'videoList']) {
-        mediaStore[key] = mediaStore[key].filter((m) => String(m.id) !== String(id));
-      }
-      persistMediaStore();
-      return ok(true);
+      await ensureMediaPersistLoaded();
+      return queueMediaMutation(async () => {
+        const removed = [];
+        for (const key of ['imageList', 'gifList', 'videoList']) {
+          removed.push(...mediaStore[key].filter((m) => String(m.id) === String(id)));
+          mediaStore[key] = mediaStore[key].filter((m) => String(m.id) !== String(id));
+        }
+        await persistMediaStore();
+        mediaBlobBytes = Math.max(0, mediaBlobBytes - removed.reduce((sum, entry) => sum + frameBytesOf(entry), 0));
+        await removeStoredFrames(removed.flatMap(frameFilesOf));
+        return ok(removed.length > 0);
+      });
     },
   },
   // 官方 getCurrentMedia → getElementDataCurrent；store 赋给 currentData
   'l122/getElementDataCurrent': {
     mode: 'replace',
     fn: async () => {
-      ensureMediaPersistLoaded();
+      await ensureMediaPersistLoaded();
       return ok(currentMediaList());
     },
   },
   'l122/setElementDataCurrent': {
     mode: 'replace',
-    fn: async (_event, serialNumber, element) => {
-      ensureMediaPersistLoaded();
-      const id = element && (element.id != null ? String(element.id) : null);
-      for (const list of [mediaStore.imageList, mediaStore.gifList, mediaStore.videoList]) {
-        for (const entry of list) {
-          entry.isCurrent = id != null && String(entry.id) === id;
-          if (entry.isCurrent && serialNumber) entry.serialNumber = serialNumber;
+    fn: async (_event, serialNumber, elements) => {
+      await ensureMediaPersistLoaded();
+      return queueMediaMutation(async () => {
+        const selected = selectedMediaEntry(elements);
+        if (!selected) {
+          return { code: 1, message: '未找到所选媒体，当前播放项保持不变', data: null };
         }
-      }
-      persistMediaStore();
-      return ok(true);
+        for (const entry of allMediaEntries()) entry.isCurrent = entry === selected;
+        if (serialNumber) selected.serialNumber = serialNumber;
+        selected.updatedAt = Date.now();
+        await persistMediaStore();
+        return ok(await playbackForEntry(selected));
+      });
     },
   },
   // 官方 ImageConfig：playingOrder / playingAnimation / switchTime
   'l122/playerConfigurationSearch': {
     mode: 'replace',
     fn: async () => {
-      ensureMediaPersistLoaded();
-      return ok({ ...playerConfig });
+      await ensureMediaPersistLoaded();
+      return ok({ ...playerConfig, support: playerSupportStatus() });
     },
   },
   'l122/playerConfigurationSet': {
     mode: 'replace',
     fn: async (_event, value) => {
-      ensureMediaPersistLoaded();
-      const v = value && typeof value === 'object' ? value : {};
-      playerConfig = {
-        playingOrder: v.playingOrder || playerConfig.playingOrder || DEFAULT_IMAGE_CONFIG.playingOrder,
-        playingAnimation: v.playingAnimation || playerConfig.playingAnimation || DEFAULT_IMAGE_CONFIG.playingAnimation,
-        switchTime: Number(v.switchTime) || playerConfig.switchTime || DEFAULT_IMAGE_CONFIG.switchTime,
-      };
-      persistPlayerConfig();
+      await ensureMediaPersistLoaded();
+      playerConfig = normalizePlayerConfig(value, playerConfig);
+      await persistPlayerConfig();
       log('playerConfigurationSet', playerConfig);
-      return ok({ ...playerConfig });
+      return ok({ ...playerConfig, support: playerSupportStatus(playerConfig, value) });
     },
   },
   'sys/restart-system': {
@@ -1055,15 +1645,19 @@ originalHandle('linux/windows', async () => {
     bounds: win.getBounds(),
   }));
 });
+originalHandle('linux/media-playback', async (_event, request) => {
+  await ensureMediaPersistLoaded();
+  const requestedId = request && typeof request === 'object' ? request.id : request;
+  const entry = requestedId != null
+    ? allMediaEntries().find((item) => String(item.id) === String(requestedId))
+    : allMediaEntries().find((item) => item && item.isCurrent);
+  return entry ? ok(await playbackForEntry(entry)) : ok(null);
+});
 // 个性化设置持久化：重启软件后自动恢复 LCD 显示内容
-function presetStorePath() {
-  try { return path.join(app.getPath('userData'), 'preset.json'); } catch (_) { return null; }
-}
 originalHandle('linux/preset-save', async (_event, config) => {
   try {
-    const file = presetStorePath();
-    if (file) fs.writeFileSync(file, JSON.stringify(config || {}), 'utf8');
-    return { ok: true };
+    const saved = await saveJsonFile('preset.json', config || {});
+    return saved ? { ok: true } : { ok: false, error: 'preset write failed' };
   } catch (error) {
     log('preset-save failed:', error);
     return { ok: false, error: error.message || String(error) };
@@ -1071,9 +1665,7 @@ originalHandle('linux/preset-save', async (_event, config) => {
 });
 originalHandle('linux/preset-load', async () => {
   try {
-    const file = presetStorePath();
-    if (!file || !fs.existsSync(file)) return null;
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const parsed = await loadJsonFile('preset.json', null, 256 * 1024);
     return parsed && parsed.digitalData ? parsed : null;
   } catch (error) {
     log('preset-load failed:', error);
@@ -1090,13 +1682,16 @@ originalHandle('linux/hold-state', async (_event, active) => {
 const AUTOSTART_DIR = path.join(os.homedir(), '.config', 'autostart');
 const AUTOSTART_FILE = path.join(AUTOSTART_DIR, 'deepcool-official-linux.desktop');
 const AUTOSTART_BIN = path.join(os.homedir(), '.local', 'bin', 'deepcool-official-linux');
+function desktopExecPath(value) {
+  return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
 function autostartDesktopContent() {
   return `[Desktop Entry]
 Type=Application
 Name=DeepCool (Linux Port) Autostart
 Name[zh_CN]=DeepCool（Linux 移植版）开机自启
 Comment=Start DeepCool official UI in background (tray) at login
-Exec=${AUTOSTART_BIN} --hidden
+Exec=${desktopExecPath(AUTOSTART_BIN)} --hidden
 Icon=deepcool-official-linux
 Terminal=false
 X-GNOME-Autostart-enabled=true
@@ -1110,6 +1705,30 @@ function autostartBinReady() {
     return true;
   } catch (_) { return false; }
 }
+async function setAutostartEnabled(want) {
+  if (want) {
+    if (!autostartBinReady()) {
+      throw new Error('未找到启动器（或不可执行），请先运行: npm run install:user');
+    }
+    let temp = null;
+    try {
+      await fs.promises.mkdir(AUTOSTART_DIR, { recursive: true });
+      temp = `${AUTOSTART_FILE}.${process.pid}.${Date.now()}.tmp`;
+      await fs.promises.writeFile(temp, autostartDesktopContent(), { mode: 0o644 });
+      await fs.promises.rename(temp, AUTOSTART_FILE);
+    } catch (error) {
+      if (temp) await fs.promises.unlink(temp).catch(() => {});
+      throw new Error(`写入开机自启文件失败: ${error.message || error}`);
+    }
+    log('autostart enabled', AUTOSTART_FILE);
+  } else {
+    await fs.promises.unlink(AUTOSTART_FILE).catch((error) => {
+      if (error && error.code !== 'ENOENT') throw error;
+    });
+    log('autostart disabled', AUTOSTART_FILE);
+  }
+  return { ok: true, enabled: fs.existsSync(AUTOSTART_FILE), path: AUTOSTART_FILE };
+}
 originalHandle('linux/autostart-status', async () => ({
   enabled: fs.existsSync(AUTOSTART_FILE),
   path: AUTOSTART_FILE,
@@ -1117,52 +1736,73 @@ originalHandle('linux/autostart-status', async () => ({
 }));
 originalHandle('linux/autostart-set', async (_event, request) => {
   const want = Boolean(request && typeof request === 'object' ? request.enabled : request);
-  if (want) {
-    if (!autostartBinReady()) {
-      throw new Error('未找到启动器（或不可执行），请先运行: npm run install:user');
-    }
-    try {
-      fs.mkdirSync(AUTOSTART_DIR, { recursive: true });
-      fs.writeFileSync(AUTOSTART_FILE, autostartDesktopContent(), { mode: 0o644 });
-    } catch (error) {
-      throw new Error(`写入开机自启文件失败: ${error.message || error}`);
-    }
-    log('autostart enabled', AUTOSTART_FILE);
-  } else {
-    try { fs.unlinkSync(AUTOSTART_FILE); } catch (_) {}
-    log('autostart disabled', AUTOSTART_FILE);
-  }
-  return { ok: true, enabled: fs.existsSync(AUTOSTART_FILE), path: AUTOSTART_FILE };
+  return setAutostartEnabled(want);
 });
 // 推图串行化：避免 overlay/多路同时打满 socket + USB
 let pushImageChain = Promise.resolve();
 originalHandle('linux/push-image', async (_event, dataUrl) => {
   const run = async () => {
-    const match = String(dataUrl || '').match(/^data:image\/png;base64,(.+)$/);
+    const match = String(dataUrl || '').match(/^data:image\/png;base64,([A-Za-z0-9+/=]+)$/);
     if (!match) throw new Error('需要 PNG data URL');
-    const png = Buffer.from(match[1], 'base64');
+    const encoded = match[1];
+    if (encoded.length > MAX_PNG_BASE64_CHARS || encoded.length % 4 !== 0
+      || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+      throw new Error('图片 Base64 编码无效或过大');
+    }
+    const png = Buffer.from(encoded, 'base64');
     if (png.length === 0) throw new Error('图片为空');
-    if (png.length > 14 * 1024 * 1024) throw new Error('图片过大（最大 14MB）');
+    if (png.length > MAX_PNG_BYTES) throw new Error('图片过大（最大 2MiB）');
     // 超时略放宽：daemon 解码 PNG 时可能短暂忙
-    return daemonRequest({ action: 'image', data: png.toString('base64') }, 12000);
+    const response = await daemonRequest({
+      action: 'image',
+      data: png.toString('base64'),
+      confirm_timeout_ms: 2000,
+    }, 12000);
+    if (response && response.ok && response.delivered !== false) lastRendererPushedDataUrl = dataUrl;
+    return response;
   };
   const next = pushImageChain.then(run, run);
   // 不让单次失败掐断后续链路
   pushImageChain = next.then(() => {}, () => {});
   return next;
 });
+const captureInFlight = new WeakMap();
+function capturePageSingleFlight(sender, bounds) {
+  const existing = captureInFlight.get(sender);
+  if (existing) return existing.result;
+
+  const capture = Promise.resolve().then(() => sender.capturePage(bounds));
+  let timeout = null;
+  const result = new Promise((resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error('capturePage timeout')), 4000);
+    capture.then(resolve, reject);
+  });
+  const state = { capture, result };
+  capture.then(() => {
+    clearTimeout(timeout);
+    if (captureInFlight.get(sender) === state) captureInFlight.delete(sender);
+  }, () => {
+    clearTimeout(timeout);
+    if (captureInFlight.get(sender) === state) captureInFlight.delete(sender);
+  });
+  captureInFlight.set(sender, state);
+  return result;
+}
 async function captureImageDataUrl(event, rect) {
+  const MAX_CAPTURE_PIXELS = 1920 * 1080;
   const bounds = {
     x: Math.max(0, Math.round(Number(rect?.x) || 0)),
     y: Math.max(0, Math.round(Number(rect?.y) || 0)),
     width: Math.min(4096, Math.max(1, Math.round(Number(rect?.width) || 320))),
     height: Math.min(4096, Math.max(1, Math.round(Number(rect?.height) || 240))),
   };
-  // capturePage 无超时：加 4s 兜底，防止并发截图挂起主进程 IPC
-  const image = await Promise.race([
-    event.sender.capturePage(bounds),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('capturePage timeout')), 4000)),
-  ]);
+  if (bounds.width * bounds.height > MAX_CAPTURE_PIXELS) {
+    throw new Error(`截图区域过大（最大 ${MAX_CAPTURE_PIXELS} 像素）`);
+  }
+  // A timed-out capturePage keeps running inside Chromium. Keep that actual
+  // capture as the sole in-flight operation until it settles, so one timeout
+  // cannot start an unbounded series of concurrent captures.
+  const image = await capturePageSingleFlight(event.sender, bounds);
   if (image.isEmpty()) throw new Error('preview capture is empty');
   const png = image.resize({ width: 320, height: 240, quality: 'best' }).toPNG();
   return `data:image/png;base64,${png.toString('base64')}`;
@@ -1176,4 +1816,21 @@ originalHandle('linux/capture-preview', async (event, rect) => {
 });
 
 log('Linux compatibility layer installed', { sockets: SOCKET_CANDIDATES, pid: process.pid });
-module.exports = { daemonRequest, daemonStatus, mapSensors, listDisks, systemInfo };
+module.exports = {
+  daemonRequest,
+  daemonStatus,
+  mapSensors,
+  listDisks,
+  systemInfo,
+  __test: {
+    isTrustedRendererUrl,
+    normalizePlayerConfig,
+    playerSupportStatus,
+    selectedMediaEntry,
+    quotas: {
+      total: MEDIA_TOTAL_QUOTA_BYTES,
+      entry: MEDIA_ENTRY_QUOTA_BYTES,
+      source: MEDIA_SOURCE_MAX_BYTES,
+    },
+  },
+};

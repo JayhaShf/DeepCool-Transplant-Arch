@@ -42,7 +42,7 @@ Module._extensions['.node'] = function (module, filename) {
       module.exports = require(stubPath);
       return module.exports;
     } catch (e) {
-      // fall through to the real loader if the stub itself is broken
+      throw new Error(`Linux native-module stub failed for ${filename}: ${e.message || e}`);
     }
   }
   return _origNodeLoader.call(this, module, filename);
@@ -53,6 +53,7 @@ try {
   require(path.join(__dirname, "linux-compat.js"));
 } catch (error) {
   try { console.error("[DeepCool Linux] compatibility layer failed:", error); } catch (_) {}
+  throw error;
 }
 
 Module._extensions[".jsc"] = function (module, filename) {
@@ -62,6 +63,9 @@ Module._extensions[".jsc"] = function (module, filename) {
   }
   setFlagHashHeader(bytecodeBuffer);
   const length = buffer2Number(getSourceHashHeader(bytecodeBuffer));
+  if (!Number.isInteger(length) || length < 0 || length > 32 * 1024 * 1024) {
+    throw new Error(`Invalid bytecode source length: ${length}`);
+  }
   let dummyCode = "";
   if (length > 1) {
     dummyCode = "\"" + "\u200b".repeat(length - 2) + "\"";

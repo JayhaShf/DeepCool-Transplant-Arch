@@ -1,0 +1,26 @@
+post_install() {
+  systemd-sysusers /usr/lib/sysusers.d/deepcool.conf
+  systemctl daemon-reload
+  echo
+  echo 'DeepCool Linux Port installed.'
+  echo 'Add each desktop user to the deepcool group, then log in again:'
+  echo '  sudo usermod -aG deepcool <username>'
+  echo 'Enable the LCD daemon when ready:'
+  echo '  sudo systemctl enable --now deepcool-lm-daemon.service'
+}
+
+post_upgrade() {
+  systemd-sysusers /usr/lib/sysusers.d/deepcool.conf
+  systemctl daemon-reload
+  systemctl try-restart deepcool-lm-daemon.service 2>/dev/null || true
+}
+
+pre_remove() {
+  systemctl stop deepcool-lm-daemon.service 2>/dev/null || true
+  systemctl disable deepcool-lm-daemon.service 2>/dev/null || true
+}
+
+post_remove() {
+  systemctl daemon-reload
+  echo 'User data under ~/.config/DeepCool-Linux-Port was preserved.'
+}
