@@ -60,6 +60,8 @@ npm run security:check
 grep -q 'linux-compat.js' "$EXTRACTED/out/main/bytecode-loader.js"
 grep -q 'ipc-policy.js' "$EXTRACTED/out/preload/index.js"
 grep -q 'linux-overlay.js' "$EXTRACTED/out/renderer/index.html"
+grep -Fq "script-src 'self' 'unsafe-eval'" "$EXTRACTED/out/renderer/index.html"
+grep -Fq "script-src 'self' 'unsafe-eval'" "$EXTRACTED/out/renderer/launch.html"
 grep -Fq "object-src 'none'" "$EXTRACTED/out/renderer/index.html"
 grep -Fq "object-src 'none'" "$EXTRACTED/out/renderer/launch.html"
 grep -q '__SOURCE_TAR_SHA256__' packaging/PKGBUILD

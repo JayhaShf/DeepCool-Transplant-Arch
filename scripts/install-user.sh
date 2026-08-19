@@ -7,10 +7,12 @@ ICON_DIR="$HOME/.local/share/icons/hicolor/256x256/apps"
 mkdir -p "$BIN_DIR" "$APP_DIR" "$ICON_DIR"
 
 BIN_SCRIPT="$BIN_DIR/deepcool-official-linux"
-printf -v RUN_COMMAND '%q' "$ROOT/scripts/run.sh"
 {
   printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
-  printf 'exec %s "$@"\n' "$RUN_COMMAND"
+  # Prefer the validated system install when present. The source checkout is
+  # only a fallback for development; its Electron binary may not be present.
+  printf '%s\n' 'if [ -x /usr/bin/deepcool-linux-port ]; then' '  exec /usr/bin/deepcool-linux-port "$@"' 'fi'
+  printf 'exec %q "$@"\n' "$ROOT/scripts/run.sh"
 } > "$BIN_SCRIPT"
 chmod +x "$BIN_SCRIPT"
 

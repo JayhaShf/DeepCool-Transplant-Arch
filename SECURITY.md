@@ -18,7 +18,10 @@ The supported launch path provides these controls:
 - Renderer IPC is allowlisted and sender URLs are restricted to the bundled
   `index.html` and `launch.html` pages.
 - External navigation and `window.open` are denied.
-- Renderer CSP disables plugins, frames, and arbitrary script sources.
+- Renderer CSP disables plugins, frames, and arbitrary script sources. It
+  permits `unsafe-eval` only because the vendor Vue-i18n bundle compiles its
+  localized messages with `new Function`; the renderer remains restricted to
+  trusted local files and is not a general web-content container.
 - User media is bounded and decoded through restricted `ffprobe`/`ffmpeg` paths;
   daemon PNG input, socket concurrency, frame size, and media quotas are capped.
 - The daemon socket is `0660 root:deepcool`; the daemon has no Linux

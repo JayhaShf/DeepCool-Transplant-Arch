@@ -60,11 +60,19 @@ if ! grep -q 'linux-overlay.js' "$INDEX_HTML"; then
 fi
 
 echo "[8/9] 为本地 renderer 安装内容安全策略"
-CSP="        <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self' data: blob: file:; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; font-src 'self' data: file:; media-src 'self' data: blob: file:; connect-src 'self' http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-src 'none'\">"
+# The vendor Vue-i18n bundle compiles messages at runtime with `new Function`.
+# Keep the local file renderer locked down, but explicitly allow that required
+# operation; without it Vue mounts only the shell and the content area is blank.
+CSP_CONTENT="default-src 'self' data: blob: file:; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; font-src 'self' data: file:; media-src 'self' data: blob: file:; connect-src 'self' http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-src 'none'"
+CSP="        <meta http-equiv=\"Content-Security-Policy\" content=\"$CSP_CONTENT\">"
 for html in "$INDEX_HTML" "$EXTRACTED/out/renderer/launch.html"; do
   [ -f "$html" ] || continue
   if ! grep -q "object-src 'none'" "$html"; then
     sed -i "/<meta charset=\"UTF-8\" \/>/a\\$CSP" "$html"
+  else
+    # Reconcile an already prepared payload as well as a fresh extraction.
+    # The release installer runs this script against its staged app.
+    sed -i -E "s#(<meta http-equiv=\"Content-Security-Policy\" content=\")[^\"]*(\">)#\1$CSP_CONTENT\2#" "$html"
   fi
 done
 

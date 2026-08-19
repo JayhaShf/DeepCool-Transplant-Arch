@@ -8,6 +8,8 @@ BIN="$HOME/.local/bin/deepcool-official-linux"
 DESKTOP="$AUTOSTART_DIR/deepcool-official-linux.desktop"
 
 mkdir -p "$AUTOSTART_DIR"
+# Keep the stable user wrapper in the desktop entry. It selects the installed
+# /opt runtime when available and falls back to the source checkout otherwise.
 desktop_escape() {
   local value="$1"
   value="${value//\\/\\\\}"

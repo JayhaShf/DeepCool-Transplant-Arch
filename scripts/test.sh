@@ -26,5 +26,6 @@ node --check patches/ipc-policy.js
 node --check patches/bytecode-loader.js
 python3 -m py_compile daemon/deepcool-lm-daemon.py
 bash -n scripts/security-check.sh
+grep -Fq "script-src 'self' 'unsafe-eval'" scripts/prepare.sh
 
 echo 'All deterministic tests passed.'

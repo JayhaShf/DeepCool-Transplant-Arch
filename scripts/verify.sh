@@ -27,6 +27,8 @@ test -f "$APP/resources/app.asar.extracted/out/renderer/linux-overlay.js"
 grep -q 'linux-compat.js' "$APP/resources/app.asar.extracted/out/main/bytecode-loader.js"
 grep -q 'ipc-policy.js' "$APP/resources/app.asar.extracted/out/preload/index.js"
 grep -q 'linux-overlay.js' "$APP/resources/app.asar.extracted/out/renderer/index.html"
+grep -Fq "script-src 'self' 'unsafe-eval'" "$APP/resources/app.asar.extracted/out/renderer/index.html"
+grep -Fq "script-src 'self' 'unsafe-eval'" "$APP/resources/app.asar.extracted/out/renderer/launch.html"
 grep -Fq "object-src 'none'" "$APP/resources/app.asar.extracted/out/renderer/index.html"
 # 补丁源文件语法（work/ 内可能仍是旧副本，以 patches/ 为准）
 node --check "$ROOT/patches/linux-compat.js"

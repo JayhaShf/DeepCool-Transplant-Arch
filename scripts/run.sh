@@ -10,6 +10,17 @@ USER_DATA_DIR="${DEEPCOOL_USER_DATA_DIR:-$HOME/.config/DeepCool-Linux-Port}"
 LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/deepcool-official-linux"
 LOG_FILE="$LOG_DIR/app.log"
 
+# A source checkout may not contain Electron after the app has been installed
+# from the binary archive. Reuse that validated runtime before attempting a
+# network bootstrap, so stale user launchers cannot fail with an env/path error.
+if [ -z "${DEEPCOOL_APP_DIR:-}" ] && [ -z "${DEEPCOOL_ELECTRON:-}" ] \
+   && [ ! -x "$ELECTRON" ] \
+   && [ -x /opt/deepcool-linux-port/electron/electron ] \
+   && [ -d /opt/deepcool-linux-port/app/resources/app.asar.extracted ]; then
+  APP="/opt/deepcool-linux-port/app"
+  ELECTRON="/opt/deepcool-linux-port/electron/electron"
+fi
+
 # daemon socket 为 0660 root:deepcool。用户已在 deepcool 组但当前会话未加载
 # （未重新登录）时 connect 会 EACCES，LCD 无画面。用 newgrp 重入补上有效组。
 # DEEPCOOL_GROUP_ACTIVE=1 防止 newgrp 后无限重入。

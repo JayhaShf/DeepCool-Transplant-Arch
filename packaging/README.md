@@ -6,13 +6,13 @@ Arch Linux x86_64；二进制归档捆绑 Electron，但仍依赖系统共享库
 
 ## 发布产物
 
-`bash packaging/build-release.sh 0.1.2` 会先清空 `dist/`，然后生成：
+`bash packaging/build-release.sh 0.1.3` 会先清空 `dist/`，然后生成：
 
 | 文件 | 内容 |
 |---|---|
-| `deepcool-linux-port-0.1.2.tar.zst` | Electron 23、已打补丁应用、daemon、运行脚本和 `/opt` 安装器 |
-| `deepcool-linux-port-0.1.2-source.tar.zst` | 仓库源码快照和 `BUILDING.md`；不含官方安装包或 npm 依赖 |
-| `deepcool-linux-port-0.1.2-sbom.cdx.json` | CycloneDX 1.5 清单，覆盖 Electron 与应用树中可识别的 Node.js 包 |
+| `deepcool-linux-port-0.1.3.tar.zst` | Electron 23、已打补丁应用、daemon、运行脚本和 `/opt` 安装器 |
+| `deepcool-linux-port-0.1.3-source.tar.zst` | 仓库源码快照和 `BUILDING.md`；不含官方安装包或 npm 依赖 |
+| `deepcool-linux-port-0.1.3-sbom.cdx.json` | CycloneDX 1.5 清单，覆盖 Electron 与应用树中可识别的 Node.js 包 |
 | `PKGBUILD` | 已写入本次 source tar SHA-256 的 Arch 构建文件 |
 | `deepcool-linux-port.install` | Arch 安装/升级/卸载 hook |
 | `SHA256SUMS` | 上述五个发布文件的 SHA-256 清单 |
@@ -38,7 +38,7 @@ npm run security:check
 `packaging/PKGBUILD`：
 
 ```bash
-bash packaging/build-release.sh 0.1.2
+bash packaging/build-release.sh 0.1.3
 cd dist
 sha256sum -c SHA256SUMS
 ```
@@ -54,25 +54,25 @@ payload 与其他捆绑内容具备再分发授权后才应设置该变量。
 先验证 `SHA256SUMS`，再解压并从解压目录外运行安装器：
 
 ```bash
-tar --zstd -xf deepcool-linux-port-0.1.2.tar.zst
-sudo bash deepcool-linux-port-0.1.2/packaging/install-tarball.sh \
-  "$PWD/deepcool-linux-port-0.1.2"
+tar --zstd -xf deepcool-linux-port-0.1.3.tar.zst
+sudo bash deepcool-linux-port-0.1.3/packaging/install-tarball.sh \
+  "$PWD/deepcool-linux-port-0.1.3"
 deepcool-linux-port
 ```
 
 安装器把应用放在 `/opt/deepcool-linux-port`，创建 `/usr/bin` 符号链接，安装桌面
 入口，并调用 daemon 安装器。归档也可直接运行
-`deepcool-linux-port-0.1.2/bin/deepcool-linux-port`，但这不会自动安装 daemon 或系统依赖。
+`deepcool-linux-port-0.1.3/bin/deepcool-linux-port`，但这不会自动安装 daemon 或系统依赖。
 
 通过 `sudo` 从桌面用户会话调用时，可附加 `--autostart`；安装器使用
 `SUDO_USER` 决定自启文件所属用户。从 root shell 直接运行时必须显式指定用户：
 
 ```bash
-sudo bash deepcool-linux-port-0.1.2/packaging/install-tarball.sh \
-  "$PWD/deepcool-linux-port-0.1.2" --autostart
+sudo bash deepcool-linux-port-0.1.3/packaging/install-tarball.sh \
+  "$PWD/deepcool-linux-port-0.1.3" --autostart
 
-sudo bash deepcool-linux-port-0.1.2/packaging/install-tarball.sh \
-  "$PWD/deepcool-linux-port-0.1.2" --autostart --user jay
+sudo bash deepcool-linux-port-0.1.3/packaging/install-tarball.sh \
+  "$PWD/deepcool-linux-port-0.1.3" --autostart --user jay
 ```
 
 运行依赖以 `PKGBUILD` 的 `depends` 数组为准，包括 Electron 所需 GTK/X11、NSS、
@@ -85,7 +85,7 @@ sudo bash deepcool-linux-port-0.1.2/packaging/install-tarball.sh \
 必须使用 `dist/PKGBUILD`，不能直接使用仍带 hash 占位符的
 `packaging/PKGBUILD`。把以下文件放在同一个空目录：
 
-- `dist/deepcool-linux-port-0.1.2-source.tar.zst`
+- `dist/deepcool-linux-port-0.1.3-source.tar.zst`
 - `dist/PKGBUILD`
 - `dist/deepcool-linux-port.install`
 - `DeepCool-1.2.12-setup.exe`
