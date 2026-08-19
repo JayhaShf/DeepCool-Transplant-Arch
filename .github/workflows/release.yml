@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version, matching package.json (for example 0.1.0)'
+        description: 'Release version, matching package.json (for example 0.1.1)'
         required: true
-        default: '0.1.0'
+        default: '0.1.1'
 
 concurrency:
   group: release-${{ github.ref }}

@@ -1,6 +1,6 @@
 {
   "name": "deepcool-official-linux-port",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Experimental Arch Linux compatibility port for DeepCool 1.2.12",
   "license": "UNLICENSED",
