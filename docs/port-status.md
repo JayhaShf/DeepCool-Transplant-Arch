@@ -1,10 +1,10 @@
 # DeepCool 1.2.12 Linux 移植状态
 
-> 本文是逐次修复的历史 changelog；**当前协议/行为以 `README.md` 与
+> 本文是逐次修复的历史 changelog（部分早期条目描述已被后续实现取代）；**当前协议/行为以 `README.md` 与
 > `daemon/README.md` 及代码为准**（数字推帧 1s、可选禅降频、强制禅 ZEN 静帧、
 > GIF/视频抽帧+switchTime、player/media 持久化、USB 单写者与 reset 限流等）。
 
-日期：2026-08-09
+最后整理：2026-08-19
 
 ## 结论
 
@@ -18,15 +18,15 @@
 - `app/get-systeminfo` → `/proc`、DMI、`nvidia-smi`
 - `app/get-disk-list` → `df`
 - `app/get-device-list` → 官方枚举，失败时 sysfs fallback
-- `l122/image-transmission` → Linux 动态 320×240 SVG 预览
+- `l122/image-transmission` → 最近一次 Canvas PNG data URL 预览
 - `linux/capture-preview` → Electron `capturePage` → PNG → daemon `image`
 - `linux/daemon-command` → `zen`（`status` 由 `linux/status` 承担）
 
 ## 尚未移植
 
-官方 L122 Rust/N-API Windows DLL 的完整函数实现：`sendImageData`、
+官方 L122 Rust/N-API Windows DLL 的完整函数实现仍未移植：`sendImageData`、
 `sendGeneralCommand`、`changeMode`、`startFileDownload`、`changeSettings`、
-`reboot` 等。当前不允许通过官方 UI 刷固件；实际帧写入由 Linux Rust daemon 完成。
+`reboot` 等。当前不允许通过官方 UI 刷固件；实际帧写入由本项目 Python daemon 完成。
 
 ## 启动优化（2026-08-09）
 
@@ -53,7 +53,7 @@
 
 ## 渲染所有权（2026-08-09）
 
-- 原生 Slint：deepcool-lm-daemon 内嵌软件渲染器（monitor/auto）。
+- 旧 Rust/Slint daemon 的原生渲染不属于当前实现。
 - 当前项目：linux-overlay.js Canvas 生成预设画面 → linux/push-image → daemon static。
 - 已通过 scripts/disable-native-render.sh 将 daemon 配置为 renderer=rust + 黑色空页，
   LCD 不再显示原生监控画面；官方预设激活时 LCD 仅显示当前项目推送内容。
@@ -65,12 +65,12 @@
 - 推送预览：进入 LM-Series 页面后，截图预览区域并每 3s 推屏。
 - 待机：daemon 进入 off 并保持（hold 状态防止状态轮询切回）。
 - 官方预设保存：按 digitalData 组合生成画面并每 3s 推屏。
-- 原生 Slint 渲染器：二进制内仍编译有该代码，但 lcd.json 已是 renderer=rust + 黑色空页，
-  不再调用；LCD 内容全部来自当前项目推帧。
+- 早期版本曾保留 Slint 渲染器配置；当前 Python daemon 不生成原生画面，LCD 内容
+  全部来自当前项目推帧。
 
 ## 统一渲染（2026-08-09）
 
-- 移除 main 进程 monitorPreview SVG 渲染（l122/image-transmission 改为静态占位）。
+- 移除 main 进程 monitorPreview SVG 渲染（l122/image-transmission 返回最近 PNG）。
 - linux-overlay.js 维护 lastFrameDataUrl，软件预览直接复用该图。
 - LCD 与软件预览同一渲染源、内容一致；默认启动即进入当前项目监控推帧。
 - image-transmission 返回裸 data URL 字符串（官方页面直接绑 img.src）。
@@ -78,9 +78,9 @@
 ## 图片上传修复（2026-08-09）
 
 - 官方 selectImg/uploadSelectedMedia 依赖 Windows DLL → Linux 桩卡“处理中”。
-- 已用 Electron dialog + nativeImage 实现：选择图片 → 裁剪缩放 320×240 →
-  frameDataUrl → overlay image 模式推屏；getAllMedia 维护内存列表。
-- 视频上传明确返回不支持错误，不再卡死。
+- 已用 Electron dialog + ffprobe/ffmpeg 实现：选择图片 → 安全检查并裁剪缩放 320×240 →
+  frameDataUrl → overlay image 模式推屏；getAllMedia 维护持久化媒体索引。
+- GIF/视频现在由受限 ffmpeg 抽帧并轮播；不是完整时间线编辑器。
 
 ## 调整显示数据（2026-08-09）
 

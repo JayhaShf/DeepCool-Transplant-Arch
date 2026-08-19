@@ -1,16 +1,7 @@
 name: release
 
-# 触发：
-#   - 推送 tag v*   （自动构建并发布 GitHub Release）
-#   - 手动 workflow_dispatch（填版本号）
-#
-# 构建流程：从 DeepCool 官网下载 DeepCool-1.2.12-setup.exe（官方源）
-# → 解包 → 应用 Linux 补丁 → packaging/build-release.sh 产出自包含二进制 tar
-# + 源码 tar → 上传 GitHub Releases。
-#
-# 注意：二进制包内含 DeepCool 官方解包素材与 Electron 运行时（约 543M），
-# 发布前请自行评估版权（README「勿再分发官方 payload」）。
-
+# Binary releases contain DeepCool's extracted payload. Keep public publishing
+# disabled unless redistribution has been reviewed and approved.
 on:
   push:
     tags:
@@ -18,168 +9,245 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '发布版本号（如 0.1.0）'
+        description: 'Release version, matching package.json (for example 0.1.0)'
         required: true
         default: '0.1.0'
 
-permissions:
-  contents: write
-
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
     env:
-      # 官方直链（cn.deepcool.com 下载页 API：download-path?version=1.2.12&name=deep-creative）
       DC_SETUP_URL_1: 'https://deepcool.io/downloads/DeepCool-1.2.12-setup.exe'
       DC_SETUP_URL_2: 'https://deepcool.omnictl.cn/downloads/DeepCool-1.2.12-setup.exe'
-      # 本地 exe 校验和（构建前强制校验，防篡改/防错误版本）
       DC_SETUP_SHA256: '4549885c716e951dde488e2117823478f7994c475e686331f93866582f6b116f'
+      SEVENZIP_URL: 'https://www.7-zip.org/a/7z2602-linux-x64.tar.xz'
+      SEVENZIP_SHA256: '41aaba7b1235304ab5aa0624530c67ae829496cd29e875925271efdccc28c03e'
+      DISPATCH_VERSION: ${{ github.event.inputs.version }}
     steps:
+      - name: Confirm binary redistribution approval
+        env:
+          ALLOW_BINARY_RELEASE: ${{ vars.ALLOW_BINARY_RELEASE }}
+        run: |
+          [ "$ALLOW_BINARY_RELEASE" = true ] || {
+            echo "Binary publishing is disabled. Set the repository variable ALLOW_BINARY_RELEASE=true only after redistribution approval." >&2
+            exit 1
+          }
+
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 18
+          node-version: 22
           cache: npm
 
-      - name: Install build tools (7zz official + zstd)
+      - name: Resolve and validate version
+        id: vars
         run: |
           set -euo pipefail
-          # Ubuntu p7zip(16.02) 解 DeepCool NSIS 会对部分 mp4 报 Data Error；
-          # 改用 7-Zip 官方静态二进制（7zz，本机 Arch 同源）。
-          curl -fsSL --retry 3 -o /tmp/7zz.tar.xz \
-            'https://www.7-zip.org/a/7z2602-linux-x64.tar.xz'
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="$DISPATCH_VERSION"
+          fi
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Version must be strict SemVer x.y.z: $VERSION" >&2
+            exit 1
+          }
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          PKGBUILD_VERSION="$(sed -n 's/^pkgver=//p' packaging/PKGBUILD)"
+          [ "$VERSION" = "$PACKAGE_VERSION" ] || {
+            echo "Tag/input $VERSION does not match package.json $PACKAGE_VERSION" >&2
+            exit 1
+          }
+          [ "$VERSION" = "$PKGBUILD_VERSION" ] || {
+            echo "package.json $VERSION does not match PKGBUILD $PKGBUILD_VERSION" >&2
+            exit 1
+          }
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG_COMMIT="$(git rev-list -n 1 "refs/tags/v$VERSION" 2>/dev/null || true)"
+            [ -n "$TAG_COMMIT" ] && [ "$TAG_COMMIT" = "$GITHUB_SHA" ] || {
+              echo "workflow_dispatch must run from the commit tagged v$VERSION" >&2
+              exit 1
+            }
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install verified build tools
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --retry-delay 3 -o /tmp/7zz.tar.xz "$SEVENZIP_URL"
+          echo "$SEVENZIP_SHA256  /tmp/7zz.tar.xz" | sha256sum -c -
           mkdir -p /tmp/7zz
           tar -xf /tmp/7zz.tar.xz -C /tmp/7zz
           test -x /tmp/7zz/7zz
-          # 双重保险：把官方 7zz 硬链接到 /usr/local/bin/7z，覆盖 Ubuntu p7zip，
-          # 这样即使脚本用裸 `7z` 也走官方版。
-          sudo ln -sf /tmp/7zz/7zz /usr/local/bin/7z
           sudo apt-get update -qq
           sudo apt-get install -y -qq zstd
-          echo "7z -> $(command -v 7z):"
-          7z 2>&1 | head -1 || true
 
-      - name: Assert build tool versions
-        run: |
-          set -euo pipefail
-          echo "== extract.sh 头（应含 ZIP_BIN）=="
-          head -12 scripts/extract.sh
-          grep -q 'ZIP_BIN' scripts/extract.sh
-          echo "== 7z 版本 =="
-          7z 2>&1 | head -1
-          /tmp/7zz/7zz 2>&1 | head -1
-          echo "== 本机验证 exe（7zz t 快速）=="
-          # 只列头部判断可解析；完整解包在下一步
-          7z t "$RUNNER_TEMP/dc-setup/DeepCool-1.2.12-setup.exe" >/dev/null 2>&1 || true
-          echo ok
-
-      # ---- 官方安装包：缓存 + 下载 + 校验 ----
       - name: Cache official setup exe
         id: cache-exe
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/dc-setup/DeepCool-1.2.12-setup.exe
           key: dc-setup-1.2.12-${{ env.DC_SETUP_SHA256 }}
 
-      - name: Download official setup exe from DeepCool
+      - name: Download verified official setup exe
         if: steps.cache-exe.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/dc-setup"
+          TARGET="$RUNNER_TEMP/dc-setup/DeepCool-1.2.12-setup.exe"
           ok=0
           for url in "$DC_SETUP_URL_1" "$DC_SETUP_URL_2"; do
             echo "trying $url"
-            if curl -fsSL --retry 3 --retry-delay 3 -o "$RUNNER_TEMP/dc-setup/DeepCool-1.2.12-setup.exe" "$url"; then
+            if curl -fsSL --retry 3 --retry-delay 3 -o "$TARGET.part" "$url" &&
+               echo "$DC_SETUP_SHA256  $TARGET.part" | sha256sum -c -; then
+              mv "$TARGET.part" "$TARGET"
               ok=1
               break
             fi
+            rm -f "$TARGET.part"
           done
-          [ "$ok" = 1 ] || { echo "官网下载失败" >&2; exit 1; }
-          cd "$RUNNER_TEMP/dc-setup"
-          echo "$DC_SETUP_SHA256  DeepCool-1.2.12-setup.exe" | sha256sum -c -
+          [ "$ok" = 1 ] || { echo "Failed to download a verified setup exe" >&2; exit 1; }
 
-      # ---- Electron 二进制缓存 ----
+      - name: Verify cached inputs
+        run: |
+          set -euo pipefail
+          SETUP="$RUNNER_TEMP/dc-setup/DeepCool-1.2.12-setup.exe"
+          echo "$DC_SETUP_SHA256  $SETUP" | sha256sum -c -
+          /tmp/7zz/7zz l -ba "$SETUP" |
+            awk '/app-64[.]7z/ { found=1 } END { exit !found }'
+
       - name: Cache Electron download
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/electron
-          key: electron-23.3.13-${{ runner.os }}
+          key: electron-23.3.13-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
-      - name: npm ci
+      - name: Install locked build dependencies
         run: npm ci --no-audit --no-fund
 
-      - name: Ensure Electron binary
+      - name: Ensure verified Electron binary
         run: node node_modules/electron/install.js
 
-      # ---- 解包 + 打补丁（同本机 bootstrap 链路）----
       - name: Extract official payload
         env:
-          # 显式指定官方 7zz，避免 PATH 命中 Ubuntu p7zip
-          ZIP_BIN: /tmp/7zz/bin/7z
+          ZIP_BIN: /tmp/7zz/7zz
         run: bash scripts/extract.sh "$RUNNER_TEMP/dc-setup/DeepCool-1.2.12-setup.exe"
 
       - name: Prepare Linux patches
         run: bash scripts/prepare.sh work/windows-app
 
-      # ---- 构建发布包 ----
-      - name: Resolve version
-        id: vars
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            V="${GITHUB_REF#refs/tags/v}"
-          else
-            V="${{ github.event.inputs.version }}"
-          fi
-          V="${V:-0.1.0}"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "version=$V"
+      - name: Test patched compatibility layer
+        run: npm test
 
-      - name: Build release tarballs
-        run: bash packaging/build-release.sh "${{ steps.vars.outputs.version }}"
-
-      - name: List artifacts
-        run: ls -lh dist/
-
-      # ---- 上传 GitHub Release ----
-      - name: Create/Update Release
+      - name: Build release artifacts
         env:
-          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.vars.outputs.version }}
+        run: bash packaging/build-release.sh "$RELEASE_VERSION"
+
+      - name: Smoke-check release artifacts
+        env:
+          RELEASE_VERSION: ${{ steps.vars.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="${{ steps.vars.outputs.version }}"
-          TAG="v$VERSION"
-          NOTES="## DeepCool Linux Port $VERSION
+          cd dist
+          sha256sum -c SHA256SUMS
+          tar --zstd -tf "deepcool-linux-port-$RELEASE_VERSION.tar.zst" |
+            awk -v expected="deepcool-linux-port-$RELEASE_VERSION/packaging/install-tarball.sh" \
+              '$0 == expected { found=1 } END { exit !found }'
+          tar --zstd -xOf "deepcool-linux-port-$RELEASE_VERSION.tar.zst" \
+            "deepcool-linux-port-$RELEASE_VERSION/deepcool-linux-port.desktop" |
+            awk '$0 == "Exec=/usr/bin/deepcool-linux-port" { found=1 } \
+              END { exit !found }'
+          node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' \
+            "deepcool-linux-port-$RELEASE_VERSION-sbom.cdx.json"
 
-          - Arch Linux 移植：官方 Electron UI + Linux 传感器 + LM-Series LCD（Python daemon）
-          - 二进制包为**自包含**：内含 Electron 23 与官方解包素材（约 543M），解压即用
-          - 源码包（-source）为纯代码，供 PKGBUILD / 合规分发
-          - 依赖：python-pyusb / python-psutil / python-pillow / acl / ffmpeg
+      - name: Upload verified release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ steps.vars.outputs.version }}
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            dist/deepcool-linux-port-${{ steps.vars.outputs.version }}.tar.zst
+            dist/deepcool-linux-port-${{ steps.vars.outputs.version }}-source.tar.zst
+            dist/deepcool-linux-port-${{ steps.vars.outputs.version }}-sbom.cdx.json
+            dist/PKGBUILD
+            dist/deepcool-linux-port.install
+            dist/SHA256SUMS
 
-          ### 使用
-          \`\`\`bash
-          tar --zstd -xf deepcool-linux-port-\$VERSION.tar.zst -C /tmp/dc
-          /tmp/dc/deepcool-linux-port-\$VERSION/bin/deepcool-linux-port
-          # 或安装 daemon + /opt + 菜单：
-          #   sudo bash /tmp/dc/deepcool-linux-port-\$VERSION/packaging/install-tarball.sh /tmp/dc/deepcool-linux-port-\$VERSION
-          \`\`\`
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Reconfirm binary redistribution approval
+        env:
+          ALLOW_BINARY_RELEASE: ${{ vars.ALLOW_BINARY_RELEASE }}
+        run: |
+          [ "$ALLOW_BINARY_RELEASE" = true ] || {
+            echo "Binary publishing is disabled; refusing to upload release assets." >&2
+            exit 1
+          }
 
-          > 版权：二进制含 DeepCool 官方素材与 Electron，请自行评估后再公开分发（README 声明「勿再分发官方 payload」）。"
+      - name: Download verified release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Verify release bundle
+        run: cd dist && sha256sum -c SHA256SUMS
+
+      - name: Create non-overwriting release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v$RELEASE_VERSION"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to replace published assets" >&2
+            exit 1
+          fi
+          NOTES_FILE="$(mktemp)"
+          trap 'rm -f "$NOTES_FILE"' EXIT
+          cat > "$NOTES_FILE" <<EOF
+          ## DeepCool Linux Port $RELEASE_VERSION
+
+          Arch Linux x86_64 compatibility port with a bundled Electron 23 runtime.
+
+          Verify downloads with \`SHA256SUMS\`. The CycloneDX SBOM inventories the
+          bundled Node.js components. The binary archive includes the /opt installer:
+
+          \`sudo bash deepcool-linux-port-$RELEASE_VERSION/packaging/install-tarball.sh deepcool-linux-port-$RELEASE_VERSION\`
+
+          The binary contains DeepCool's extracted payload. Redistribution requires
+          separate authorization from the relevant copyright holders.
+          EOF
           gh release create "$TAG" \
-            dist/deepcool-linux-port-$VERSION.tar.zst \
-            dist/deepcool-linux-port-$VERSION-source.tar.zst \
-            --title "DeepCool Linux Port $VERSION" \
-            --notes "$NOTES" \
-            || gh release upload "$TAG" \
-                 dist/deepcool-linux-port-$VERSION.tar.zst \
-                 dist/deepcool-linux-port-$VERSION-source.tar.zst \
-                 --clobber
-          echo "Release: $TAG"
+            dist/deepcool-linux-port-$RELEASE_VERSION.tar.zst \
+            dist/deepcool-linux-port-$RELEASE_VERSION-source.tar.zst \
+            dist/deepcool-linux-port-$RELEASE_VERSION-sbom.cdx.json \
+            dist/PKGBUILD \
+            dist/deepcool-linux-port.install \
+            dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "DeepCool Linux Port $RELEASE_VERSION" \
+            --notes-file "$NOTES_FILE"

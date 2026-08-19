@@ -6,13 +6,36 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SETUP="${1:-$ROOT/DeepCool-1.2.12-setup.exe}"
-NSIS_DIR="${NSIS_DIR:-$ROOT/work/nsis}"
-APP_DIR="${APP_DIR:-$ROOT/work/windows-app}"
 ASAR_BIN="$ROOT/node_modules/.bin/asar"
 SEVENZIP="${ZIP_BIN:-7z}"
+EXPECTED_SETUP_SHA256="4549885c716e951dde488e2117823478f7994c475e686331f93866582f6b116f"
+
+# 解包会覆盖和递归删除输出目录，因此所有输出都必须在规范化后的 work/ 内。
+mkdir -p -- "$ROOT/work"
+[ ! -L "$ROOT/work" ] || { echo "拒绝使用符号链接 work 目录: $ROOT/work" >&2; exit 1; }
+WORK_ROOT="$(realpath -e -- "$ROOT/work")"
+safe_work_child() {
+  local requested="$1" resolved
+  resolved="$(realpath -m -- "$requested")"
+  case "$resolved" in
+    "$WORK_ROOT"/*) printf '%s\n' "$resolved" ;;
+    *) echo "拒绝不安全的解包路径（必须是 $WORK_ROOT 的子目录）: $requested" >&2; return 1 ;;
+  esac
+}
+NSIS_DIR="$(safe_work_child "${NSIS_DIR:-$ROOT/work/nsis}")"
+APP_DIR="$(safe_work_child "${APP_DIR:-$ROOT/work/windows-app}")"
+[ "$NSIS_DIR" != "$APP_DIR" ] || { echo "NSIS_DIR 与 APP_DIR 不能相同" >&2; exit 1; }
 
 [ -f "$SETUP" ] || { echo "找不到安装包: $SETUP" >&2; exit 1; }
 command -v "$SEVENZIP" >/dev/null || { echo "缺少 7z（Arch: sudo pacman -S 7zip；CI 用官方 7zz 并设 7Z 变量）" >&2; exit 1; }
+command -v sha256sum >/dev/null || { echo "缺少 sha256sum" >&2; exit 1; }
+ACTUAL_SETUP_SHA256="$(sha256sum -- "$SETUP" | awk '{print $1}')"
+[ "$ACTUAL_SETUP_SHA256" = "$EXPECTED_SETUP_SHA256" ] || {
+  echo "官方安装包 SHA-256 不匹配，拒绝解包" >&2
+  echo "期望: $EXPECTED_SETUP_SHA256" >&2
+  echo "实际: $ACTUAL_SETUP_SHA256" >&2
+  exit 1
+}
 
 if [ -f "$APP_DIR/resources/app.asar" ] && [ -d "$APP_DIR/resources/app.asar.extracted" ] && [ "${FORCE_EXTRACT:-0}" != 1 ]; then
   echo "已存在解包结果: $APP_DIR"
@@ -21,18 +44,9 @@ if [ -f "$APP_DIR/resources/app.asar" ] && [ -d "$APP_DIR/resources/app.asar.ext
 fi
 
 if [ "${FORCE_EXTRACT:-0}" = 1 ]; then
-  # 路径安全：仅允许删除仓库 work/ 下的解包目录（NSIS_DIR/APP_DIR 可被环境变量覆盖，
-  # 防止误设成 $HOME 等目录时 FORCE_EXTRACT 递归删除）
-  case "$NSIS_DIR:$APP_DIR" in
-    "$ROOT/work/"*:"$ROOT/work/"*) ;;
-    *)
-      echo "FORCE_EXTRACT 拒绝：NSIS_DIR/APP_DIR 必须在 \$ROOT/work 下（当前 $NSIS_DIR / $APP_DIR）" >&2
-      exit 1
-      ;;
-  esac
-  rm -rf "$NSIS_DIR" "$APP_DIR"
+  rm -rf -- "$NSIS_DIR" "$APP_DIR"
 fi
-mkdir -p "$NSIS_DIR" "$APP_DIR"
+mkdir -p -- "$NSIS_DIR" "$APP_DIR"
 
 echo "[1/4] 解 NSIS 外壳（7z=$SEVENZIP）"
 "$SEVENZIP" x -y -o"$NSIS_DIR" "$SETUP" >/dev/null
@@ -43,8 +57,8 @@ echo "[2/4] 解 Electron Windows payload"
 "$SEVENZIP" x -y -o"$APP_DIR" "$PAYLOAD" >/dev/null
 if [ -d "$APP_DIR/app" ] && [ ! -f "$APP_DIR/DeepCool.exe" ]; then
   shopt -s dotglob nullglob
-  mv "$APP_DIR/app"/* "$APP_DIR/"
-  rmdir "$APP_DIR/app"
+  mv -- "$APP_DIR/app"/* "$APP_DIR/"
+  rmdir -- "$APP_DIR/app"
 fi
 
 # NSIS 中有一部分新视频资源不在 app-64.7z，合并进 payload。
@@ -57,11 +71,12 @@ ASAR="$APP_DIR/resources/app.asar"
 [ -f "$ASAR" ] || { echo "找不到 $ASAR" >&2; exit 1; }
 
 echo "[3/4] 解 app.asar"
-rm -rf "$APP_DIR/resources/app.asar.extracted"
+rm -rf -- "$APP_DIR/resources/app.asar.extracted"
 if [ -x "$ASAR_BIN" ]; then
   "$ASAR_BIN" extract "$ASAR" "$APP_DIR/resources/app.asar.extracted"
 else
-  npx --yes @electron/asar@3.2.17 extract "$ASAR" "$APP_DIR/resources/app.asar.extracted"
+  echo "缺少锁定的 asar 工具: $ASAR_BIN；请先运行 npm ci" >&2
+  exit 1
 fi
 
 echo "[4/4] 校验"

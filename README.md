@@ -80,6 +80,14 @@ npm run start:debug   # 等价 DEEPCOOL_CDP=1 npm start
 npm run verify
 ```
 
+发布前安全检查（保留官方 Electron 23 字节码兼容性的风险接受方案）：
+
+```bash
+npm run security:check
+```
+
+安全边界、已接受的 Electron 23 残余风险和升级条件见 `SECURITY.md`。
+
 ## 桌面启动速度
 
 - 启动脚本直接使用 `node_modules/electron/dist/electron`（ELF），不再经过
@@ -189,8 +197,8 @@ npm run uninstall:user
 ```bash
 lsusb -d 3633:0026
 systemctl status deepcool-lm-daemon.service
-command ls -la /run/deepcool-lm/deepcool-lm.sock   # 期望 srw-rw----+ root deepcool（+ 表示有 ACL）
-groups "$USER" | grep deepcool                    # 账号在组即可；当前会话 id 可能暂无该组
+command ls -la /run/deepcool-lm/deepcool-lm.sock   # 期望 srw-rw---- root deepcool
+groups "$USER" | grep deepcool                    # 加组后重新登录，或由 run.sh 安全执行 newgrp
 ```
 
 ## LCD 内容由谁渲染（当前架构）
@@ -204,8 +212,8 @@ groups "$USER" | grep deepcool                    # 账号在组即可；当前�
 
 ## daemon（Python 重写版）
 
-原 Rust daemon（`deepcool-lm-rust`）源码已丢失（重装系统 + GitHub 无备份），
-按移植层锁定的协议规格重写为 Python 单文件，协议完全兼容
+本项目当前 daemon 是 Python 单文件实现；它按移植层锁定的协议规格工作，
+兼容旧 Rust daemon 的 socket 字段，但不依赖旧 Rust/Slint 渲染器。
 （socket JSON / snapshot 字段 / image 推帧 / zen / brightness）。USB 命令来自
 [daedlock/deepcool-lm](https://github.com/daedlock/deepcool-lm)（LM360 实测）。
 
@@ -218,15 +226,14 @@ sudo bash scripts/reinstall-daemon.sh
 ```
 
 `install-daemon.sh` 会安装依赖（python-pyusb/python-psutil/python-pillow）、
-创建 `deepcool` 组并把安装用户加入该组、安装 systemd unit、启用启动
-`deepcool-lm-daemon.service`（root 运行、`Group=deepcool`、自动重启，
-socket **0660 root:deepcool** + 用户 ACL，双实例保护）。加组后若不注销，
-`id` 可能仍无 deepcool（正常）；ACL 按 UID 授权，无需重登即可推帧。
+创建 `deepcool` 组、安装 systemd unit 并启用
+`deepcool-lm-daemon.service`（受限 root 进程、自动重启，socket **0660 root:deepcool**，
+双实例保护）。加组后需重新登录；`run.sh` 可在当前会话中安全使用 `newgrp`。
 详见 `daemon/README.md`。
 
 ### daemon 协议摘要
 
-Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 + ACL），JSON 请求：
+Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 root:deepcool），JSON 请求：
 
 | 动作 | 参数 | 说明 |
 |---|---|---|
@@ -242,8 +249,8 @@ Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 + ACL），JSON 请求：
 导致 UI 一直停在"处理中"。移植层已实现 Linux 上传：
 
 - `media/selectImg` / `selectGif` / `selectVideo`：Electron 原生文件对话框；
-- 静图：`nativeImage` 裁切缩放 320×240 → `frameDataUrl`；
-- **GIF / 视频**：本机 `ffmpeg` 抽帧（时长与帧数有上限）→ `frames[]`；
+- 静图：受限 `ffprobe` 检查尺寸，再由 `ffmpeg` 裁切缩放 320×240 → `frameDataUrl`；
+- **GIF / 视频**：本机 `ffmpeg` 显式选择第一个视频流抽帧（时长、帧数、PNG 大小和媒体配额均有上限）→ `frames[]`；
   overlay 按官方 `ImageConfig.switchTime`（默认 3000ms）轮播推 LCD；
 - `l122/playerConfigurationSearch/Set`：读写 `playingOrder/playingAnimation/switchTime`，
   持久化到 `userData/player-config.json`；
@@ -265,8 +272,8 @@ Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 + ACL），JSON 请求：
 ## 统一渲染
 
 - **只有一套渲染**：`linux-overlay.js` 的 Canvas 渲染器。
-- 软件 LM-Series 页面预览（`l122/image-transmission`）不再由 main 进程生成 SVG，
-  而是直接返回最近推送到 LCD 的同一张图（`lastFrameDataUrl`）。
+- 软件 LM-Series 页面预览（`l122/image-transmission`）直接返回最近推送到 LCD 的
+  同一张 PNG（`lastFrameDataUrl`），不再由 main 进程生成 SVG。
 - LCD 与软件预览显示完全一致。
 
 ## 推帧周期（对齐官方 + 防固件卡死）
@@ -296,7 +303,7 @@ Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 + ACL），JSON 请求：
 
 - 官方 `modelConfigurationSet` 路径互切数字/多媒体；禅分级与亮度软遮罩；
 - playerConfiguration / 媒体持久化；GIF·视频 ffmpeg 抽帧轮播；
-- daemon USB 单写者、分包、reset 限流；socket 0660+用户 ACL；CDP 默认关。
+- daemon USB 单写者、分包、reset 限流；socket 0660 root:deepcool；CDP 默认关。
 
 ## 当前限制
 
@@ -305,6 +312,9 @@ Unix socket `/run/deepcool-lm/deepcool-lm.sock`（0660 + ACL），JSON 请求：
 - Windows 控制器 `.node` 未重编译；固件升级禁用；HWiNFO 等 Windows 专有能力为桩。
 - LCD 控制器若进入「bulk 写成功但不刷新」固件死锁，软件 reset 不一定够，可能仍需断电。
 - Electron 23 已停更，仅建议离线本机使用；勿加载不可信网页。
+- `npm audit` 当前报告 Electron 23.3.13 / extract-zip 的 2 个 high 风险；不能直接升级到
+  Electron 43，因为官方主进程是匹配 Electron/V8 的字节码。项目因此默认关闭 CDP、
+  限制 IPC/CSP/导航，并要求本地可信 payload；请不要把应用暴露到网络。
 - 安装包与官方素材版权属 DeepCool；勿再分发官方 payload。
 
 ## 目录
@@ -319,5 +329,6 @@ scripts/install-user.sh  用户级命令和 desktop entry
 screenshots/             本机验证截图
 docs/reverse-engineering.md  逆向记录
 docs/port-status.md      移植与修复记录
+SECURITY.md              安全边界与残余风险接受记录
 work/                    解包与分析产物（不应提交/分发）
 ```

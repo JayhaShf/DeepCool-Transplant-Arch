@@ -13,6 +13,10 @@ function makeMagic() {
     apply(target, thisArg, args) { return p; },
     construct(target, args) { return p; },
     get(target, prop, receiver) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, prop);
+      if (descriptor && !descriptor.configurable && 'value' in descriptor && !descriptor.writable) {
+        return descriptor.value;
+      }
       if (prop === 'then') {
         // thenable: await 桩值时立即完成。关键约束：resolve 的值绝不能是 p
         // （p 是 thenable，promise 解析会再次收养 → 无限微任务链挂起），
@@ -29,10 +33,19 @@ function makeMagic() {
       if (prop === Symbol.for('nodejs.util.inspect.custom')) return () => '[DeepCool linux stub]';
       return p;
     },
-    set() { return true; },
+    set(target, prop, value) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, prop);
+      if (descriptor && !descriptor.configurable && 'value' in descriptor && !descriptor.writable) {
+        return Object.is(descriptor.value, value);
+      }
+      return true;
+    },
     has() { return true; },
-    ownKeys() { return []; },
-    getOwnPropertyDescriptor() { return { configurable: true, enumerable: false, writable: true, value: p }; }
+    ownKeys(target) { return Reflect.ownKeys(target); },
+    getOwnPropertyDescriptor(target, prop) {
+      return Reflect.getOwnPropertyDescriptor(target, prop)
+        || { configurable: true, enumerable: false, writable: true, value: p };
+    }
   });
   return p;
 }

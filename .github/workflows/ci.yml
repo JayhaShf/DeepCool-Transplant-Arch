@@ -1,0 +1,49 @@
+name: ci
+
+# Branch and pull-request validation is intentionally separate from the
+# release workflow. It must never publish the extracted vendor payload.
+on:
+  push:
+    branches:
+      - main
+      - 'codex/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install daemon test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-pil python3-psutil python3-usb
+
+      - name: Run deterministic tests
+        run: npm test
+
+      - name: Run security gate
+        env:
+          DEEPCOOL_SECURITY_SOURCE_ONLY: '1'
+        run: npm run security:check

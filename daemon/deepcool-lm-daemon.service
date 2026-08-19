@@ -1,20 +1,53 @@
 [Unit]
 Description=DeepCool LM-Series LCD daemon (Linux Python port)
-# 等 USB 子系统起来，避免开机抢在枚举前 reset 风暴
-After=multi-user.target systemd-udevd.service
+After=systemd-udevd.service
 Wants=systemd-udevd.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /usr/local/bin/deepcool-lm-daemon
+# USB 节点与 sysfs reauth 当前要求 root；能力集仍全部清空。
+User=root
 Group=deepcool
-UMask=0007
-Restart=always
-RestartSec=5
-# 给 USB 枚举一点时间（冷启动）
-ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/python3 /usr/local/bin/deepcool-lm-daemon --reset-state /var/lib/deepcool-lm/reset-state.json
+UMask=0077
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
 RuntimeDirectory=deepcool-lm
-RuntimeDirectoryMode=0755
+RuntimeDirectoryMode=0750
+StateDirectory=deepcool-lm
+StateDirectoryMode=0700
+
+# root UID 仅用于设备文件所有者权限，不保留任何 Linux capability。
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+
+# Python/Pillow 只需读取主机传感器；仅 USB reauth 路径需要写入。
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/sys/bus/usb/devices
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=256
 
 [Install]
 WantedBy=multi-user.target
