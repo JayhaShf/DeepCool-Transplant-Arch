@@ -94,7 +94,7 @@ jobs:
           tar -xf /tmp/7zz.tar.xz -C /tmp/7zz
           test -x /tmp/7zz/7zz
           sudo apt-get update -qq
-          sudo apt-get install -y -qq zstd
+          sudo apt-get install -y -qq zstd python3-pil python3-psutil python3-usb
 
       - name: Cache official setup exe
         id: cache-exe
