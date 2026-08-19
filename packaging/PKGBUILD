@@ -1,7 +1,7 @@
 # Maintainer: Jay <jay@localhost>
 # The release builder replaces __SOURCE_TAR_SHA256__ in dist/PKGBUILD.
 pkgname=deepcool-linux-port
-pkgver=0.1.1
+pkgver=0.1.2
 pkgrel=1
 pkgdesc="Arch Linux x86_64 compatibility port for the DeepCool 1.2.12 Electron UI"
 arch=('x86_64')

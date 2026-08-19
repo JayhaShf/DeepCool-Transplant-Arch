@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP="${DEEPCOOL_APP_DIR:-$ROOT/work/windows-app}"
+if [ -n "${DEEPCOOL_APP_DIR:-}" ]; then
+  APP="$DEEPCOOL_APP_DIR"
+elif [ -d "$ROOT/app/resources/app.asar.extracted" ]; then
+  APP="$ROOT/app"
+else
+  APP="$ROOT/work/windows-app"
+fi
+if [ -n "${DEEPCOOL_ELECTRON:-}" ]; then
+  ELECTRON_BIN="$DEEPCOOL_ELECTRON"
+elif [ -x "$ROOT/electron/electron" ]; then
+  ELECTRON_BIN="$ROOT/electron/electron"
+else
+  ELECTRON_BIN="$ROOT/node_modules/.bin/electron"
+fi
 PORT="${REMOTE_DEBUG_PORT:-9333}"
 VERIFY_JSON="$(mktemp "${TMPDIR:-/tmp}/deepcool-port-verify.XXXXXX.json")"
 trap 'rm -f -- "$VERIFY_JSON"' EXIT
@@ -18,7 +31,7 @@ grep -Fq "object-src 'none'" "$APP/resources/app.asar.extracted/out/renderer/ind
 # 补丁源文件语法（work/ 内可能仍是旧副本，以 patches/ 为准）
 node --check "$ROOT/patches/linux-compat.js"
 node --check "$ROOT/patches/linux-overlay.js"
-printf 'Electron: '; "$ROOT/node_modules/.bin/electron" --version 2>/dev/null | tail -n1
+printf 'Electron: '; "$ELECTRON_BIN" --version 2>/dev/null | tail -n1
 printf 'USB:      '; lsusb -d 3633:0026 | head -n1
 printf 'Daemon:   '; systemctl is-active deepcool-lm-daemon.service 2>/dev/null || true
 printf 'Socket:   '; ls -l /run/deepcool-lm/deepcool-lm.sock 2>/dev/null || echo '(missing)'

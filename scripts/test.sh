@@ -11,6 +11,10 @@ echo '--- Python unit tests ---'
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s daemon/tests -p 'test_*.py' -v
 
 echo '--- Source syntax ---'
+[ -x daemon/install-daemon.sh ] || {
+  echo 'daemon/install-daemon.sh must be executable' >&2
+  exit 1
+}
 mapfile -d '' -t shell_scripts < <(find scripts daemon packaging -type f -name '*.sh' -print0)
 for script in "${shell_scripts[@]}"; do
   bash -n "$script"

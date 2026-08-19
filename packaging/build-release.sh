@@ -85,6 +85,10 @@ cp scripts/run.sh scripts/prepare.sh scripts/verify.sh scripts/install-user.sh \
    scripts/reinstall-daemon.sh scripts/disable-native-render.sh scripts/security-check.sh "$STAGE/scripts/"
 cp -a patches "$STAGE/patches"
 cp -a daemon "$STAGE/daemon"
+test -x "$STAGE/daemon/install-daemon.sh" || {
+  echo 'daemon installer lost its executable bit in release staging' >&2
+  exit 1
+}
 cp -a tools "$STAGE/tools"
 cp package.json package-lock.json README.md SECURITY.md "$STAGE/"
 install -m0755 packaging/install-tarball.sh "$STAGE/packaging/install-tarball.sh"
